@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "comptabilite-smmd-alsace",
+  "private_key_id": "da84c2608df12215062aed466ff35daf3984c321",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC6SBj9ko/9xSmv\nc0wntQEuFRyl8Z1V2jYtDLFSEyFQCv0g6Xzzg6dwJxHmWROHvJ71oI+sI+O4g3fv\nDLnFvBtWLoXLoh5ROe1pHIFr4wU0Ohelc8SJo2BTRvnGB5FW37oBpJILzkJ1E3cW\njaJru7kT0XphUV3gMy0QehHpHOSIz55i6zqPHJYOGGjc/rorWUXzsRJ9InE72TgE\n67UR4KiNPxn56acvQM4SlP3ZCEBxbXhu9G0Uo2H4PmVg04HxdycbEVpdEcZCI1bS\ngeQ4rASrywz2xFB15DzUDTBjCOZjHuC7W/IrbzWPn6+rI0K9Zob72ArZZa2HzUTL\nvgne7CDrAgMBAAECggEATgpmbdU4/dfb3uUuwnPSSrwNhHf0skL472ah4wCgtCfm\nZCNtdZdyTkoP9bDbvcIH1l+t0TA39tUdKcjrCywDR9e1tdn1WZIrJB4NGmXBiF/O\nCEK30/HeKQVTHuOMwBh6lLWdedSvgtzkx04O/ZNntiXMX3j3GzZVatG5LzArjiS0\nC0JlxVSWEgY6h4r0ViVRfngyjlgX61yw1qzJe+LRSOlEIxbuACXYYotPZGB1BczO\nArUKl0AGuBNVt+Oj+PM2WYFx7a4bP1qIsxnnD5NbrUkF9KyZkIMwBuuqU5m4BaQj\n/iRsNZfqYIoHLj02frKtKp28Fqgd+eIDIy1yShDgAQKBgQD8mbJ7jFcGrBHjQcUG\nenflhHg/scF5b07lVxb4ia4d5qIQpyOH7veYsimhA959sZJgsBvmi9R/8sO0IRPB\n1kmcDzgDH09eQsVwMu0w12kqJBJNyEwvGNsq4ttdRorVMo+cemVTffseYIt3RA4F\n7YSWcOLJwIVLL39sQ/khsNOfwQKBgQC8yehThrP/zl4gCGCHOUs56N2pjwJTqgkq\nN/9m0ceaWuDxVrLd/dz4bmiClET5SuDgGrb7+hbO/92fPgVPDm4le4PmnYkJSg3c\n8s0lkQ1XPfsagPG7WS/aWfZJ3mTlVeQ2NYwBfkXYAAt+48KLnpD4n73+XvQutWUl\ndgLEdHsrqwKBgF6Xt+zoSxamjTRLRtr8NbXve5BuooM1GZhsmp+L/3YXDg2qaXXY\nGURHQ6uWZVUwkB5BFNGq/3LCmGL2GA34jywvzsvsh65G1uUDTSuDH1C2nVwfa9gf\nOMPAnGE7r3XTL1BrzVIM1WM0yEVraMzzezlTILporAHR0afbdIoXS8iBAoGAVV4r\ny1FXJa5oy61eEOesh6QwT9MWJ0T1XfzyZckorDi6DQe6XD3GZSRv59QqGFxusYgD\nBJBDLhlvWunNtsD8t8BRlb/YzrWI7Udx0rHzyWaCnKqAJMqgo+kYQLDrCPU8+/Jc\nu/QgmxryF8/gEgiC35pEbLj9S/3EnhruB23woH8CgYEAhnkB/5yyGlT/sq8HnESd\n7csEZnuJtEAK92UaOgZamFjV8UCwgC4lZqENh6Edjm+eu+P3w6nvCuTduReQa2Mx\nz0YcPnL76pH+02u/k26PmOu9r7dm8IdDUVcwnE5jRfZKeJETavgvMISVwUW+H4ba\n+evixEIKcfbvjG53egILHnA=\n-----END PRIVATE KEY-----\n",
+  "client_email": "firestore-app@comptabilite-smmd-alsace.iam.gserviceaccount.com",
+  "client_id": "105434538706695790897",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firestore-app%40comptabilite-smmd-alsace.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

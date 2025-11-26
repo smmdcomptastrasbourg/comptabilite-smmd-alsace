@@ -1,6 +1,9 @@
 import os
 import csv
 import io
+import json
+from google.oauth2 import service_account
+
 from datetime import datetime, date
 
 from flask import (
@@ -27,13 +30,38 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 
-# Firestore
-db = firestore.Client()
+# -------------------------------------------------------------------
+# Initialisation Firestore avec credentials explicites
+# -------------------------------------------------------------------
+creds_json_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+creds_file_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+if creds_json_env:
+    # Cas déploiement (Render) : la clé JSON est dans une variable d'environnement
+    creds_dict = json.loads(creds_json_env)
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    db = firestore.Client(credentials=credentials, project=creds_dict["project_id"])
+
+elif creds_file_env and os.path.exists(creds_file_env):
+    # Cas local (Codespaces) : la variable pointe vers un fichier JSON
+    with open(creds_file_env, "r") as f:
+        creds_dict = json.load(f)
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    db = firestore.Client(credentials=credentials, project=creds_dict["project_id"])
+
+else:
+    # Rien n'est configuré : on stoppe tout avec un message explicite
+    raise RuntimeError(
+        "Aucun identifiant Firestore trouvé. "
+        "Définis soit GOOGLE_APPLICATION_CREDENTIALS vers le fichier JSON (local), "
+        "soit GOOGLE_APPLICATION_CREDENTIALS_JSON avec le contenu JSON (Render)."
+    )
 
 USERS_COLLECTION = "users"
 CITIES_COLLECTION = "cities"
 ALLOC_CONFIGS_COLLECTION = "allocationConfigs"
 TRANSACTIONS_COLLECTION = "transactions"
+EXPENSE_CATEGORIES_COLLECTION = "expenseCategories"
 
 # -------------------------------------------------------------------
 # Utilitaires généraux
@@ -151,6 +179,25 @@ def update_user(user_id: str, **fields):
     get_user_doc_ref(user_id).update(fields)
 
 # -------------------------------------------------------------------
+# Catégories de dépenses
+# -------------------------------------------------------------------
+
+def get_active_expense_categories():
+    """Catégories actives, triées par nom."""
+    docs = (
+        db.collection(EXPENSE_CATEGORIES_COLLECTION)
+        .where("active", "==", True)
+        .order_by("name")
+        .stream()
+    )
+    categories = []
+    for doc in docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        categories.append(d)
+    return categories
+
+# -------------------------------------------------------------------
 # Allocation mensuelle
 # -------------------------------------------------------------------
 
@@ -211,6 +258,8 @@ def create_transaction(
     is_advance: bool,
     advance_status: str | None,
     description: str,
+    category_id: str | None = None,
+    category_name: str | None = None,
 ):
     now = utc_now_iso()
     school_year = get_school_year_for_date(d)
@@ -229,6 +278,8 @@ def create_transaction(
         "isAdvance": is_advance,
         "advanceStatus": advance_status,
         "description": description,
+        "categoryId": category_id,
+        "categoryName": category_name,
         "createdAt": now,
         "updatedAt": now,
     }
@@ -342,49 +393,125 @@ BASE_LAYOUT = """
 <head>
   <meta charset="utf-8">
   <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
-  <style>
-    body { font-family: sans-serif; margin: 2rem; }
-    nav a { margin-right: 1rem; }
-    .error { color: red; }
-    .success { color: green; }
-    table { border-collapse: collapse; margin-top: 1rem; }
-    th, td { border: 1px solid #ccc; padding: 0.4rem 0.8rem; }
-    form { margin-top: 1rem; }
-    input, select { margin: 0.2rem 0; padding: 0.2rem 0.4rem; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap 5 -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  >
 </head>
-<body>
-  <nav>
-    {% if session.user_id %}
-      Bonjour {{ session.short_name }} |
-      <a href="{{ url_for('dashboard') }}">Tableau de bord</a>
-      <a href="{{ url_for('income') }}">Recettes</a>
-      <a href="{{ url_for('expense') }}">Dépenses</a>
-      {% if session.role in ['chef', 'admin'] %}
-        <a href="{{ url_for('chef_advances') }}">Avances (chef)</a>
-        <a href="{{ url_for('chef_export') }}">Export ville</a>
-      {% endif %}
-      {% if session.role == 'admin' %}
-        <a href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
-      {% endif %}
-      <a href="{{ url_for('logout') }}">Déconnexion</a>
-    {% else %}
-      <a href="{{ url_for('login') }}">Connexion</a>
-    {% endif %}
+<body class="bg-light">
+
+  <!-- Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="{{ url_for('dashboard') }}">Compta SMMD</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+              data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent"
+              aria-expanded="false" aria-label="Basculer la navigation">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="navbarSupportedContent">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          {% if session.user_id %}
+
+            {# ---- CAS ADMIN : uniquement les menus d’admin ---- #}
+            {% if session.role == 'admin' %}
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('admin_transactions') }}">Admin compta</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('admin_categories') }}">Catégories dépenses</a>
+              </li>
+
+            {# ---- CAS NON-ADMIN : utilisateur / chef ---- #}
+            {% else %}
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Tableau de bord</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('income') }}">Recettes</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('expense') }}">Dépenses</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('my_operations') }}">Mes opérations</a>
+              </li>
+
+              {% if session.role in ['chef'] %}
+                <li class="nav-item">
+                  <a class="nav-link" href="{{ url_for('chef_city_transactions') }}">Compta maison</a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link" href="{{ url_for('chef_advances') }}">Avances (chef)</a>
+                </li>
+                <li class="nav-item">
+                  <a class="nav-link" href="{{ url_for('chef_export') }}">Export ville</a>
+                </li>
+              {% endif %}
+            {% endif %}
+
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('logout') }}">Déconnexion</a>
+            </li>
+
+          {% else %}
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('login') }}">Connexion</a>
+            </li>
+          {% endif %}
+        </ul>
+
+        {% if session.user_id %}
+          <span class="navbar-text text-white">
+            Bonjour {{ session.short_name }}
+          </span>
+        {% endif %}
+      </div>
+    </div>
   </nav>
-  <hr>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      <ul>
-      {% for category, msg in messages %}
-        <li class="{{ category }}">{{ msg }}</li>
-      {% endfor %}
-      </ul>
-    {% endif %}
-  {% endwith %}
+  <div class="container mb-5">
 
-  {{ body|safe }}
+    <!-- Messages flash -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, msg in messages %}
+          {% if category == 'error' %}
+            {% set alert_class = 'danger' %}
+          {% elif category == 'success' %}
+            {% set alert_class = 'success' %}
+          {% else %}
+            {% set alert_class = 'info' %}
+          {% endif %}
+          <div class="alert alert-{{ alert_class }} alert-dismissible fade show" role="alert">
+            {{ msg }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fermer"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <!-- Carte principale -->
+    <div class="card shadow-sm">
+      <div class="card-body">
+        {{ body|safe }}
+      </div>
+    </div>
+  </div>
+
+  <script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"
+  ></script>
 </body>
 </html>
 """
@@ -531,6 +658,7 @@ def income():
     school_year = get_school_year_for_date(today)
     year_month = get_year_month(today)
 
+    # --- Traitement du formulaire "allocation mensuelle" ---
     if request.method == "POST" and request.form.get("form_type") == "allocation":
         try:
             monthly_amount = float(request.form.get("monthly_amount").replace(",", "."))
@@ -540,9 +668,54 @@ def income():
             if monthly_amount <= 0:
                 flash("Le montant doit être positif.", "error")
             else:
+                # 1) Met à jour la config d'allocation pour l'année scolaire en cours
                 upsert_allocation_config(user["id"], user["cityId"], school_year, monthly_amount)
-                flash("Allocation mensuelle mise à jour pour l'année scolaire en cours.", "success")
 
+                # 2) Met à jour (ou crée) la transaction d'allocation pour le MOIS EN COURS
+                alloc_query = (
+                    db.collection(TRANSACTIONS_COLLECTION)
+                    .where("userId", "==", user["id"])
+                    .where("cityId", "==", user["cityId"])
+                    .where("schoolYear", "==", school_year)
+                    .where("yearMonth", "==", year_month)
+                    .where("source", "==", "allocation_mensuelle")
+                    .limit(1)
+                )
+
+                existing_alloc_doc = None
+                for doc in alloc_query.stream():
+                    existing_alloc_doc = doc
+                    break
+
+                if existing_alloc_doc:
+                    # On met simplement à jour le montant de la transaction existante
+                    existing_alloc_doc.reference.update(
+                        {
+                            "amount": float(monthly_amount),
+                            "updatedAt": utc_now_iso(),
+                        }
+                    )
+                else:
+                    # Aucune transaction pour ce mois : on la crée
+                    create_transaction(
+                        city_id=user["cityId"],
+                        user_id=user["id"],
+                        d=today,
+                        ttype="income",
+                        source="allocation_mensuelle",
+                        amount=float(monthly_amount),
+                        payment_method="virement",
+                        is_advance=False,
+                        advance_status=None,
+                        description=f"Allocation mensuelle {year_month}",
+                    )
+
+                flash(
+                    "Allocation mensuelle mise à jour pour le mois en cours et les mois suivants de l'année scolaire.",
+                    "success",
+                )
+
+    # --- Traitement du formulaire "recette ponctuelle" ---
     if request.method == "POST" and request.form.get("form_type") == "extra_income":
         desc = request.form.get("description", "").strip() or "Recette ponctuelle"
         try:
@@ -567,39 +740,49 @@ def income():
                 )
                 flash(f"Recette ponctuelle de {amount:.2f} € ajoutée.", "success")
 
+    # On recharge la config après éventuelle mise à jour
     config = get_allocation_config(user["id"], school_year)
     monthly_amount = config["monthlyAmount"] if config else None
+
+    # Petit bloc affichant clairement le montant actuel
+    if monthly_amount is not None:
+        current_alloc_html = f"<p>Montant actuel de l'allocation : <strong>{monthly_amount:.2f} €</strong></p>"
+    else:
+        current_alloc_html = "<p>Aucune allocation mensuelle définie pour cette année scolaire.</p>"
 
     body = f"""
       <h1>Recettes</h1>
       <h2>Allocation mensuelle (année scolaire {school_year})</h2>
-      <form method="post">
+
+      {current_alloc_html}
+
+      <form method="post" class="mb-4">
         <input type="hidden" name="form_type" value="allocation">
-        <div>
-          <label>Montant mensuel (€) :</label><br>
-          <input type="text" name="monthly_amount" value="{monthly_amount if monthly_amount else ''}" required>
+        <div class="mb-3">
+          <label class="form-label">Montant mensuel (€) :</label><br>
+          <input class="form-control" type="text" name="monthly_amount" value="{monthly_amount if monthly_amount else ''}" required>
         </div>
-        <button type="submit">Enregistrer</button>
+        <button class="btn btn-primary" type="submit">Enregistrer</button>
       </form>
 
       <h2>Recette ponctuelle ({year_month})</h2>
       <form method="post">
         <input type="hidden" name="form_type" value="extra_income">
-        <div>
-          <label>Montant (€) :</label><br>
-          <input type="text" name="amount" required>
+        <div class="mb-3">
+          <label class="form-label">Montant (€) :</label><br>
+          <input class="form-control" type="text" name="amount" required>
         </div>
-        <div>
-          <label>Description :</label><br>
-          <input type="text" name="description">
+        <div class="mb-3">
+          <label class="form-label">Description :</label><br>
+          <input class="form-control" type="text" name="description">
         </div>
-        <button type="submit">Ajouter</button>
+        <button class="btn btn-success" type="submit">Ajouter</button>
       </form>
     """
     return render_page(body, "Recettes")
 
 # -------------------------------------------------------------------
-# Dépenses
+# Dépenses (avec catégories)
 # -------------------------------------------------------------------
 
 @app.route("/expense", methods=["GET", "POST"])
@@ -611,10 +794,18 @@ def expense():
         return redirect(url_for("login"))
 
     today = date.today()
+    categories = get_active_expense_categories()
 
     if request.method == "POST":
         form_type = request.form.get("form_type")
         desc = request.form.get("description", "").strip() or "Dépense"
+        category_id = request.form.get("category_id") or None
+        category_name = None
+
+        if category_id:
+            cat_doc = db.collection(EXPENSE_CATEGORIES_COLLECTION).document(category_id).get()
+            if cat_doc.exists:
+                category_name = cat_doc.to_dict().get("name")
 
         try:
             amount = float(request.form.get("amount").replace(",", "."))
@@ -640,6 +831,8 @@ def expense():
                 is_advance=False,
                 advance_status=None,
                 description=desc,
+                category_id=category_id,
+                category_name=category_name,
             )
             flash("Dépense CB ville enregistrée.", "success")
 
@@ -656,12 +849,19 @@ def expense():
                 is_advance=True,
                 advance_status="en_attente",
                 description=desc,
+                category_id=category_id,
+                category_name=category_name,
             )
             flash("Avance de frais enregistrée.", "success")
 
         return redirect(url_for("expense"))
 
-    body = """
+    # Options de catégories pour le HTML
+    category_options = ""
+    for c in categories:
+        category_options += f'<option value="{c["id"]}">{c["name"]}</option>'
+
+    body = f"""
       <h1>Dépenses</h1>
 
       <h2>Dépense CB de la maison</h2>
@@ -669,6 +869,11 @@ def expense():
         <input type="hidden" name="form_type" value="cb_ville">
         <label>Montant (€):</label><br>
         <input type="text" name="amount" required><br>
+        <label>Catégorie :</label><br>
+        <select name="category_id" required>
+          <option value="">-- choisir --</option>
+          {category_options}
+        </select><br>
         <label>Description:</label><br>
         <input type="text" name="description"><br>
         <button type="submit">Enregistrer</button>
@@ -679,6 +884,11 @@ def expense():
         <input type="hidden" name="form_type" value="avance">
         <label>Montant (€):</label><br>
         <input type="text" name="amount" required><br>
+        <label>Catégorie :</label><br>
+        <select name="category_id" required>
+          <option value="">-- choisir --</option>
+          {category_options}
+        </select><br>
         <label>Moyen de paiement :</label><br>
         <select name="payment_method">
           <option value="cb_perso">CB personnelle</option>
@@ -689,8 +899,208 @@ def expense():
         <input type="text" name="description"><br>
         <button type="submit">Enregistrer</button>
       </form>
+      <p><em>Les catégories sont définies par l'administrateur.</em></p>
     """
     return render_page(body, "Dépenses")
+
+# -------------------------------------------------------------------
+# Mes opérations (historique personnel) + annulation dernière opération
+# -------------------------------------------------------------------
+
+@app.route("/my-operations")
+def my_operations():
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    today = date.today()
+
+    year_param = request.args.get("year")
+    month_param = request.args.get("month")
+
+    try:
+        if year_param and month_param:
+            year = int(year_param)
+            month = int(month_param)
+            selected_date = date(year, month, 1)
+        else:
+            selected_date = today
+    except ValueError:
+        selected_date = today
+
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    tx_query = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("userId", "==", user["id"])
+        .where("yearMonth", "==", year_month)
+        .order_by("date")
+    )
+
+    try:
+        tx_docs = list(tx_query.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.", "error")
+        tx_docs = []
+
+    rows_html = ""
+    total = 0.0
+    last_cancellable_tx_id = None
+
+    for doc in tx_docs:
+        t = doc.to_dict()
+        tx_id = doc.id
+        amount = float(t.get("amount", 0.0))
+        total += amount
+
+        ttype = t.get("type")
+        if ttype == "income":
+            type_label = "Recette"
+        elif ttype == "expense":
+            type_label = "Dépense"
+        else:
+            type_label = ttype or ""
+
+        source = t.get("source") or ""
+        if source == "allocation_mensuelle":
+            source_label = "Allocation mensuelle"
+        elif source == "recette_ponctuelle":
+            source_label = "Recette ponctuelle"
+        elif source == "depense_carte_ville":
+            source_label = "Dépense CB maison"
+        elif source == "avance_frais_personnelle":
+            source_label = "Avance de frais"
+        else:
+            source_label = source
+
+        if source != "allocation_mensuelle":
+            last_cancellable_tx_id = tx_id
+
+        category_name = t.get("categoryName") or ""
+
+        rows_html += f"""
+          <tr>
+            <td>{t.get('date')}</td>
+            <td>{type_label}</td>
+            <td>{source_label}</td>
+            <td>{category_name}</td>
+            <td>{t.get('paymentMethod') or ''}</td>
+            <td>{amount:.2f}</td>
+            <td>{t.get('description') or ''}</td>
+            <td>{t.get('advanceStatus') or ''}</td>
+          </tr>
+        """
+
+    selected_year = selected_date.year
+    selected_month = selected_date.month
+
+    cancel_block = ""
+    if last_cancellable_tx_id:
+        cancel_url = url_for("cancel_last_operation")
+        cancel_block = f"""
+          <form method="post" action="{cancel_url}" style="margin-top:1rem;">
+            <input type="hidden" name="year" value="{selected_year}">
+            <input type="hidden" name="month" value="{selected_month}">
+            <button type="submit" onclick="return confirm('Annuler définitivement la dernière opération de ce mois ?');">
+              Annuler la dernière opération de ce mois
+            </button>
+          </form>
+        """
+
+    body = f"""
+      <h1>Mes opérations</h1>
+      <p>Année scolaire : {school_year}</p>
+
+      <form method="get">
+        <label>Année :</label>
+        <input type="number" name="year" value="{selected_year}" min="2000" max="2100" required>
+        <label>Mois :</label>
+        <input type="number" name="month" value="{selected_month}" min="1" max="12" required>
+        <button type="submit">Afficher</button>
+      </form>
+
+      {cancel_block}
+
+      <h2>Opérations pour {year_month}</h2>
+      <table>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Source</th>
+          <th>Catégorie</th>
+          <th>Moyen de paiement</th>
+          <th>Montant (€)</th>
+          <th>Description</th>
+          <th>Statut avance</th>
+        </tr>
+        {rows_html if rows_html else "<tr><td colspan='8'>Aucune opération pour ce mois.</td></tr>"}
+      </table>
+
+      <h3>Total du mois : {total:.2f} €</h3>
+    """
+    return render_page(body, "Mes opérations")
+
+@app.route("/my-operations/cancel-last", methods=["POST"])
+def cancel_last_operation():
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    year_str = request.form.get("year")
+    month_str = request.form.get("month")
+
+    try:
+        year = int(year_str)
+        month = int(month_str)
+        selected_date = date(year, month, 1)
+    except Exception:
+        flash("Paramètres de date invalides.", "error")
+        return redirect(url_for("my_operations"))
+
+    year_month = get_year_month(selected_date)
+
+    tx_query = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("userId", "==", user["id"])
+        .where("yearMonth", "==", year_month)
+        .order_by("date")
+    )
+
+    try:
+        tx_docs = list(tx_query.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.", "error")
+        return redirect(url_for("my_operations", year=year, month=month))
+
+    last_cancellable_doc = None
+    for doc in tx_docs:
+        t = doc.to_dict()
+        source = t.get("source") or ""
+        if source != "allocation_mensuelle":
+            last_cancellable_doc = doc
+
+    if not last_cancellable_doc:
+        flash("Aucune opération annulable pour ce mois (hors allocation mensuelle).", "error")
+        return redirect(url_for("my_operations", year=year, month=month))
+
+    tx_id = last_cancellable_doc.id
+    last_data = last_cancellable_doc.to_dict()
+    amount = float(last_data.get("amount", 0.0))
+    desc = last_data.get("description") or ""
+    source = last_data.get("source") or ""
+
+    db.collection(TRANSACTIONS_COLLECTION).document(tx_id).delete()
+
+    flash(
+        f"Dernière opération annulée (source={source}, montant={amount:.2f} €, description='{desc}').",
+        "success",
+    )
+    return redirect(url_for("my_operations", year=year, month=month))
 
 # -------------------------------------------------------------------
 # Interface chef : Avances
@@ -768,7 +1178,7 @@ def chef_mark_reimbursed(tx_id):
     return redirect(url_for("chef_advances"))
 
 # -------------------------------------------------------------------
-# Chef/Admin : Export CSV
+# Chef / Admin : Export CSV (ville simple – année scolaire courante)
 # -------------------------------------------------------------------
 
 @app.route("/chef/export")
@@ -791,7 +1201,7 @@ def chef_export():
     writer = csv.writer(output, delimiter=";")
     writer.writerow(
         ["id", "date", "yearMonth", "type", "source", "amount",
-         "paymentMethod", "description", "userFullName",
+         "paymentMethod", "categoryName", "description", "userFullName",
          "isAdvance", "advanceStatus"]
     )
 
@@ -808,6 +1218,7 @@ def chef_export():
             t.get("source"),
             t.get("amount"),
             t.get("paymentMethod"),
+            t.get("categoryName"),
             t.get("description"),
             uname,
             t.get("isAdvance"),
@@ -824,6 +1235,594 @@ def chef_export():
         mimetype="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+# -------------------------------------------------------------------
+# Chef : Compta maison (vue filtrée + export)
+# -------------------------------------------------------------------
+
+@app.route("/chef/compta", methods=["GET"])
+def chef_city_transactions():
+    require_login()
+    require_chef_or_admin()
+    user = current_user()
+    today = date.today()
+
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", user["cityId"])
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        subtitle = f"Année scolaire {school_year}"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        subtitle = f"Mois {year_month}"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour cette requête (chef_city_transactions).", "error")
+        docs = []
+
+    rows = ""
+    total = 0.0
+    count = 0
+
+    for doc in docs:
+        t = doc.to_dict()
+        amount = float(t.get("amount", 0.0))
+        total += amount
+        count += 1
+
+        u = get_user_by_id(t.get("userId")) if t.get("userId") else None
+        uname = u["fullName"] if u else ""
+
+        ttype = t.get("type") or ""
+        source = t.get("source") or ""
+        pay = t.get("paymentMethod") or ""
+        desc = t.get("description") or ""
+        adv_status = t.get("advanceStatus") or ""
+        cat_name = t.get("categoryName") or ""
+
+        rows += f"""
+          <tr>
+            <td>{t.get('date')}</td>
+            <td>{ttype}</td>
+            <td>{source}</td>
+            <td>{cat_name}</td>
+            <td>{pay}</td>
+            <td>{amount:.2f}</td>
+            <td>{uname}</td>
+            <td>{adv_status}</td>
+            <td>{desc}</td>
+          </tr>
+        """
+
+    export_url = url_for(
+        "chef_city_transactions_export",
+        mode=mode,
+        year=year,
+        month=month,
+    )
+
+    body = f"""
+      <h1>Compta maison – {user['cityId'].capitalize()}</h1>
+
+      <form method="get" style="margin-bottom: 1rem;">
+        <label>Mode :</label>
+        <label><input type="radio" name="mode" value="month" {"checked" if mode == "month" else ""}> Mois</label>
+        <label><input type="radio" name="mode" value="schoolyear" {"checked" if mode == "schoolyear" else ""}> Année scolaire</label>
+
+        <label style="margin-left:1rem;">Année :</label>
+        <input type="number" name="year" value="{year}" min="2000" max="2100" required>
+
+        <label>Mois :</label>
+        <input type="number" name="month" value="{month}" min="1" max="12">
+
+        <button type="submit">Afficher</button>
+      </form>
+
+      <p><strong>Filtre :</strong> {subtitle} – Ville : {user['cityId']}</p>
+      <p><strong>Nombre d'opérations :</strong> {count} – <strong>Total :</strong> {total:.2f} €</p>
+
+      <p>
+        <a href="{export_url}">📥 Exporter en CSV (mêmes filtres)</a>
+      </p>
+
+      <table>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Source</th>
+          <th>Catégorie</th>
+          <th>Moyen</th>
+          <th>Montant (€)</th>
+          <th>Utilisateur</th>
+          <th>Statut avance</th>
+          <th>Description</th>
+        </tr>
+        {rows if rows else "<tr><td colspan='9'>Aucune opération pour ce filtre.</td></tr>"}
+      </table>
+    """
+    return render_page(body, "Compta maison")
+
+
+@app.route("/chef/compta/export")
+def chef_city_transactions_export():
+    require_login()
+    require_chef_or_admin()
+    user = current_user()
+    today = date.today()
+
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", user["cityId"])
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        filename = f"chef_compta_{user['cityId']}_{school_year}.csv"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        filename = f"chef_compta_{user['cityId']}_{year_month}.csv"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour l'export (chef_city_transactions_export).", "error")
+        return redirect(url_for("chef_city_transactions", mode=mode, year=year, month=month))
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(
+        ["date", "yearMonth", "schoolYear",
+         "type", "source", "amount", "paymentMethod",
+         "categoryName", "description", "userFullName",
+         "isAdvance", "advanceStatus"]
+    )
+
+    for doc in docs:
+        t = doc.to_dict()
+        u = get_user_by_id(t.get("userId"))
+        uname = u["fullName"] if u else ""
+        writer.writerow([
+            t.get("date"),
+            t.get("yearMonth"),
+            t.get("schoolYear"),
+            t.get("type"),
+            t.get("source"),
+            t.get("amount"),
+            t.get("paymentMethod"),
+            t.get("categoryName"),
+            t.get("description"),
+            uname,
+            t.get("isAdvance"),
+            t.get("advanceStatus"),
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+# -------------------------------------------------------------------
+# Admin : Compta (voir / annuler / exporter opérations)
+# -------------------------------------------------------------------
+
+@app.route("/admin/transactions", methods=["GET"])
+def admin_transactions():
+    require_login()
+    require_admin()
+    today = date.today()
+
+    city = request.args.get("city", "all")
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION)
+
+    if city != "all":
+        q = q.where("cityId", "==", city)
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        subtitle = f"Année scolaire {school_year}"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        subtitle = f"Mois {year_month}"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.", "error")
+        docs = []
+
+    rows = ""
+    total = 0.0
+    count = 0
+
+    for doc in docs:
+        t = doc.to_dict()
+        tx_id = doc.id
+        amount = float(t.get("amount", 0.0))
+        total += amount
+        count += 1
+
+        u = get_user_by_id(t.get("userId")) if t.get("userId") else None
+        uname = u["fullName"] if u else ""
+
+        city_label = t.get("cityId") or ""
+        ttype = t.get("type") or ""
+        source = t.get("source") or ""
+        pay = t.get("paymentMethod") or ""
+        desc = t.get("description") or ""
+        adv_status = t.get("advanceStatus") or ""
+        cat_name = t.get("categoryName") or ""
+
+        delete_url = url_for(
+            "admin_delete_transaction",
+            tx_id=tx_id,
+            city=city,
+            mode=mode,
+            year=year,
+            month=month,
+        )
+
+        rows += f"""
+          <tr>
+            <td>{tx_id}</td>
+            <td>{city_label}</td>
+            <td>{t.get('date')}</td>
+            <td>{ttype}</td>
+            <td>{source}</td>
+            <td>{cat_name}</td>
+            <td>{pay}</td>
+            <td>{amount:.2f}</td>
+            <td>{uname}</td>
+            <td>{adv_status}</td>
+            <td>{desc}</td>
+            <td><a href="{delete_url}" onclick="return confirm('Supprimer définitivement cette opération ?');">Annuler</a></td>
+          </tr>
+        """
+
+    export_url = url_for(
+        "admin_transactions_export",
+        city=city,
+        mode=mode,
+        year=year,
+        month=month,
+    )
+
+    body = f"""
+      <h1>Admin compta – toutes opérations</h1>
+
+      <form method="get" style="margin-bottom: 1rem;">
+        <label>Ville :</label>
+        <select name="city">
+          <option value="all" {"selected" if city == "all" else ""}>Toutes</option>
+          <option value="strasbourg" {"selected" if city == "strasbourg" else ""}>Strasbourg</option>
+          <option value="colmar" {"selected" if city == "colmar" else ""}>Colmar</option>
+        </select>
+
+        <label style="margin-left:1rem;">Mode :</label>
+        <label><input type="radio" name="mode" value="month" {"checked" if mode == "month" else ""}> Mois</label>
+        <label><input type="radio" name="mode" value="schoolyear" {"checked" if mode == "schoolyear" else ""}> Année scolaire</label>
+
+        <label style="margin-left:1rem;">Année :</label>
+        <input type="number" name="year" value="{year}" min="2000" max="2100" required>
+
+        <label>Mois :</label>
+        <input type="number" name="month" value="{month}" min="1" max="12">
+
+        <button type="submit">Afficher</button>
+      </form>
+
+      <p><strong>Filtre :</strong> {subtitle} – Ville : {"toutes" if city == "all" else city}</p>
+      <p><strong>Nombre d'opérations :</strong> {count} – <strong>Total :</strong> {total:.2f} €</p>
+
+      <p>
+        <a href="{export_url}">📥 Exporter en CSV (mêmes filtres)</a>
+      </p>
+
+      <table>
+        <tr>
+          <th>ID</th>
+          <th>Ville</th>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Source</th>
+          <th>Catégorie</th>
+          <th>Moyen</th>
+          <th>Montant (€)</th>
+          <th>Utilisateur</th>
+          <th>Statut avance</th>
+          <th>Description</th>
+          <th>Action</th>
+        </tr>
+        {rows if rows else "<tr><td colspan='12'>Aucune opération pour ce filtre.</td></tr>"}
+      </table>
+    """
+    return render_page(body, "Admin compta")
+
+
+@app.route("/admin/transactions/export")
+def admin_transactions_export():
+    require_login()
+    require_admin()
+    today = date.today()
+
+    city = request.args.get("city", "all")
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION)
+
+    if city != "all":
+        q = q.where("cityId", "==", city)
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{school_year}.csv"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{year_month}.csv"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour l'export (admin_transactions_export).", "error")
+        return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(
+        ["id", "cityId", "date", "yearMonth", "schoolYear",
+         "type", "source", "amount", "paymentMethod",
+         "categoryName", "description", "userFullName",
+         "isAdvance", "advanceStatus"]
+    )
+
+    for doc in docs:
+        t = doc.to_dict()
+        tx_id = doc.id
+        u = get_user_by_id(t.get("userId"))
+        uname = u["fullName"] if u else ""
+        writer.writerow([
+            tx_id,
+            t.get("cityId"),
+            t.get("date"),
+            t.get("yearMonth"),
+            t.get("schoolYear"),
+            t.get("type"),
+            t.get("source"),
+            t.get("amount"),
+            t.get("paymentMethod"),
+            t.get("categoryName"),
+            t.get("description"),
+            uname,
+            t.get("isAdvance"),
+            t.get("advanceStatus"),
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/admin/transactions/delete/<tx_id>")
+def admin_delete_transaction(tx_id):
+    require_login()
+    require_admin()
+
+    city = request.args.get("city", "all")
+    mode = request.args.get("mode", "month")
+    year = request.args.get("year")
+    month = request.args.get("month")
+
+    ref = db.collection(TRANSACTIONS_COLLECTION).document(tx_id)
+    doc = ref.get()
+    if not doc.exists:
+        flash("Opération introuvable.", "error")
+    else:
+        data = doc.to_dict()
+        amount = float(data.get("amount", 0.0))
+        source = data.get("source") or ""
+        desc = data.get("description") or ""
+        ref.delete()
+        flash(f"Opération supprimée (source={source}, montant={amount:.2f} €, description='{desc}').", "success")
+
+    return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
+
+# -------------------------------------------------------------------
+# Admin : Gestion catégories de dépenses
+# -------------------------------------------------------------------
+
+@app.route("/admin/categories", methods=["GET", "POST"])
+def admin_categories():
+    require_login()
+    require_admin()
+
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        if not name:
+            flash("Le nom de la catégorie est obligatoire.", "error")
+        else:
+            now = utc_now_iso()
+            doc_ref = db.collection(EXPENSE_CATEGORIES_COLLECTION).document()
+            doc_ref.set(
+                {
+                    "name": name,
+                    "active": True,
+                    "createdAt": now,
+                    "updatedAt": now,
+                }
+            )
+            flash(f"Catégorie '{name}' créée.", "success")
+        return redirect(url_for("admin_categories"))
+
+    docs = (
+        db.collection(EXPENSE_CATEGORIES_COLLECTION)
+        .order_by("name")
+        .stream()
+    )
+
+    rows = ""
+    for doc in docs:
+        c = doc.to_dict()
+        cid = doc.id
+        rows += f"""
+          <tr>
+            <td>{cid}</td>
+            <td>{c.get('name')}</td>
+            <td>{"Oui" if c.get("active") else "Non"}</td>
+            <td>
+              {"-" if not c.get("active") else f'<a href="{url_for("admin_category_disable", cat_id=cid)}">Désactiver</a>'}
+            </td>
+          </tr>
+        """
+
+    body = f"""
+      <h1>Catégories de dépenses</h1>
+      <form method="post">
+        <label>Nom de la nouvelle catégorie :</label><br>
+        <input type="text" name="name" required><br>
+        <button type="submit">Ajouter</button>
+      </form>
+
+      <h2>Liste des catégories</h2>
+      <table>
+        <tr>
+          <th>ID</th>
+          <th>Nom</th>
+          <th>Active</th>
+          <th>Action</th>
+        </tr>
+        {rows if rows else "<tr><td colspan='4'>Aucune catégorie encore créée.</td></tr>"}
+      </table>
+    """
+    return render_page(body, "Catégories dépenses")
+
+@app.route("/admin/categories/<cat_id>/disable")
+def admin_category_disable(cat_id):
+    require_login()
+    require_admin()
+
+    ref = db.collection(EXPENSE_CATEGORIES_COLLECTION).document(cat_id)
+    doc = ref.get()
+    if not doc.exists:
+        flash("Catégorie introuvable.", "error")
+    else:
+        ref.update(
+            {
+                "active": False,
+                "updatedAt": utc_now_iso(),
+            }
+        )
+        flash("Catégorie désactivée.", "success")
+
+    return redirect(url_for("admin_categories"))
 
 # -------------------------------------------------------------------
 # Admin : Gestion utilisateurs
