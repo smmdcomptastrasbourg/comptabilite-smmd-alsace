@@ -537,27 +537,57 @@ def render_page(body, title="Comptabilité SMMD Alsace"):
 # Routes: Authentification
 # -------------------------------------------------------------------
 
-@app.route("/login", methods=["GET", "POST"])
+@@app.route("/login", methods=["GET", "POST"])
 def login():
+    # Si on soumet le formulaire (POST)
     if request.method == "POST":
-        login_name = request.form.get("login", "").strip()
-        password = request.form.get("password", "")
+        ident = request.form.get("username", "").strip().lower()
+        pwd = request.form.get("password", "")
 
-        user = get_user_by_login(login_name)
-        if not user or not user.get("active", False):
+        # Connexion admin
+        if ident == "admin":
+            if pwd == ADMIN_PASSWORD:
+                session["user_id"] = "admin"
+                session["role"] = "admin"
+                session["short_name"] = "Admin"
+                return redirect(url_for("admin_transactions"))
             flash("Identifiant ou mot de passe incorrect.", "error")
-        else:
-            password_hash = user.get("passwordHash")
-            if not password_hash or not check_password_hash(password_hash, password):
-                flash("Identifiant ou mot de passe incorrect.", "error")
-            else:
-                login_user(user)
-                update_user(user["id"], lastLoginAt=utc_now_iso())
-                if user.get("mustChangePassword", False):
-                    return redirect(url_for("change_password_first"))
-                return redirect(url_for("dashboard"))
+            return redirect(url_for("login"))
 
-        body = """
+        # Connexion utilisateur (user / chef)
+        q = db.collection(USERS_COLLECTION).where("login", "==", ident).limit(1)
+        docs = list(q.stream())
+        if not docs:
+            flash("Identifiant incorrect.", "error")
+            return redirect(url_for("login"))
+
+        user_doc = docs[0]
+        user = user_doc.to_dict()
+
+        # Premier login sans mot de passe défini
+        if "passwordHash" not in user:
+            if pwd == MASTER_PASSWORD:
+                h = generate_password_hash(MASTER_PASSWORD)
+                user_doc.reference.update({"passwordHash": h})
+                pwd_ok = True
+            else:
+                pwd_ok = False
+        else:
+            pwd_ok = check_password_hash(user["passwordHash"], pwd)
+
+        if not pwd_ok:
+            flash("Identifiant ou mot de passe incorrect.", "error")
+            return redirect(url_for("login"))
+
+        # Connexion réussie
+        session["user_id"] = user_doc.id
+        session["role"] = user.get("role", "user")
+        session["short_name"] = user.get("shortName", user.get("fullName", ident))
+
+        return redirect(url_for("dashboard"))
+
+    # Si on arrive en GET : on affiche simplement le formulaire
+    body = """
     <div class="row justify-content-center">
       <div class="col-md-6 col-lg-4">
         <div class="card shadow-sm border-0">
@@ -586,8 +616,8 @@ def login():
       </div>
     </div>
     """
-
     return render_page(body, "Connexion")
+
 
 @app.route("/logout")
 def logout():
