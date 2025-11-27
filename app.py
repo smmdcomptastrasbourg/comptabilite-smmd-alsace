@@ -66,6 +66,7 @@ CITIES_COLLECTION = "cities"
 ALLOC_CONFIGS_COLLECTION = "allocationConfigs"
 TRANSACTIONS_COLLECTION = "transactions"
 EXPENSE_CATEGORIES_COLLECTION = "expenseCategories"
+ALLOCATIONS_COLLECTION = "allocations"
 
 # -------------------------------------------------------------------
 # Utilitaires généraux
@@ -372,6 +373,16 @@ def current_user():
     if not uid:
         return None
     return get_user_by_id(uid)
+def get_school_year(d: date) -> str:
+    """
+    Retourne l'année scolaire au format 'AAAA-AAAA'.
+    Exemple : si d = 2025-11, retourne '2025-2026'.
+    """
+    year = d.year
+    if d.month >= 9:
+        return f"{year}-{year+1}"
+    else:
+        return f"{year-1}-{year}"
 
 def require_login():
     if not session.get("user_id"):
@@ -743,6 +754,227 @@ def dashboard():
 # -------------------------------------------------------------------
 # Recettes
 # -------------------------------------------------------------------
+@app.route("/income", methods=["GET", "POST"])
+def income():
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+
+    user = current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    today = date.today()
+    year_month = today.strftime("%Y-%m")
+    school_year = get_school_year(today)
+
+    # 1) Récupération allocation existante
+    alloc_doc = (
+        db.collection(ALLOCATIONS_COLLECTION)
+        .where("userId", "==", user["id"])
+        .where("schoolYear", "==", school_year)
+        .limit(1)
+        .stream()
+    )
+    alloc_doc = list(alloc_doc)
+    allocation_amount = 0.0
+
+    if alloc_doc:
+        allocation_amount = alloc_doc[0].to_dict().get("amount", 0.0)
+
+    # -------------------------------------------------------------------
+    # POST : Mise à jour allocation ou ajout recette ponctuelle
+    # -------------------------------------------------------------------
+    if request.method == "POST":
+        action = request.form.get("action")
+
+        # --- Mise à jour allocation ---
+        if action == "set_allocation":
+            try:
+                new_amount = float(request.form.get("allocation_amount").replace(",", "."))
+            except Exception:
+                flash("Montant d’allocation invalide.", "error")
+                return redirect(url_for("income"))
+
+            # Mise à jour (création si première fois)
+            if alloc_doc:
+                alloc_doc[0].reference.update({
+                    "amount": new_amount,
+                    "updatedAt": datetime.utcnow().isoformat()
+                })
+            else:
+                db.collection(ALLOCATIONS_COLLECTION).add({
+                    "userId": user["id"],
+                    "cityId": user["cityId"],
+                    "amount": new_amount,
+                    "schoolYear": school_year,
+                    "createdAt": datetime.utcnow().isoformat(),
+                })
+
+            flash("Allocation mensuelle mise à jour.", "success")
+            return redirect(url_for("income"))
+
+        # --- Recette ponctuelle ---
+        if action == "add_extra_income":
+            try:
+                amount = float(request.form.get("amount").replace(",", "."))
+            except Exception:
+                flash("Montant invalide.", "error")
+                return redirect(url_for("income"))
+
+            desc = request.form.get("description", "").strip() or "Recette ponctuelle"
+
+            create_transaction(
+                city_id=user["cityId"],
+                user_id=user["id"],
+                d=today,
+                ttype="income",
+                source="recette_ponctuelle",
+                amount=abs(amount),
+                payment_method=None,
+                is_advance=False,
+                advance_status=None,
+                description=desc,
+                category_id=None,
+                category_name=None,
+            )
+
+            flash("Recette ponctuelle ajoutée.", "success")
+            return redirect(url_for("income"))
+
+    # -------------------------------------------------------------------
+    # Récupération des recettes du mois
+    # -------------------------------------------------------------------
+    q = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("cityId", "==", user["cityId"])
+        .where("ttype", "==", "income")
+        .where("yearMonth", "==", year_month)
+        .order_by("timestamp")
+    )
+    docs = q.stream()
+
+    month_incomes = []
+    for d in docs:
+        data = d.to_dict()
+        month_incomes.append({
+            "date": data.get("date", ""),
+            "amount": data.get("amount", 0),
+            "isAllocation": data.get("source") == "allocation",
+            "description": data.get("description", ""),
+        })
+
+    # -------------------------------------------------------------------
+    # Interface HTML
+    # -------------------------------------------------------------------
+    rows_html = ""
+    for tr in month_incomes:
+        badge = (
+            '<span class="badge bg-success-subtle text-success border border-success-subtle">Allocation</span>'
+            if tr["isAllocation"] else
+            '<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Ponctuelle</span>'
+        )
+        rows_html += f"""
+        <tr>
+            <td>{tr["date"]}</td>
+            <td>{badge}</td>
+            <td>{tr["description"]}</td>
+            <td class="text-end">{tr["amount"]:.2f} €</td>
+        </tr>
+        """
+
+    body = f"""
+    <h1 class="mb-4">Recettes</h1>
+
+    <div class="row g-4">
+      <!-- Allocation mensuelle -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-success text-white">
+            <h5 class="mb-0">Allocation mensuelle</h5>
+          </div>
+          <div class="card-body">
+
+            <p class="text-muted">
+              Année scolaire : <strong>{school_year}</strong><br>
+              Mois en cours : <strong>{year_month}</strong>
+            </p>
+
+            <form method="post">
+              <input type="hidden" name="action" value="set_allocation">
+
+              <div class="mb-3">
+                <label class="form-label">Montant mensuel actuel</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  class="form-control"
+                  name="allocation_amount"
+                  value="{allocation_amount:.2f}"
+                  required
+                >
+              </div>
+
+              <div class="d-grid">
+                <button class="btn btn-success">Mettre à jour</button>
+              </div>
+            </form>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Recette ponctuelle -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">Recette ponctuelle</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="action" value="add_extra_income">
+
+              <div class="mb-3">
+                <label class="form-label">Montant</label>
+                <input type="number" step="0.01" min="0" name="amount" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Description</label>
+                <input type="text" name="description" class="form-control" placeholder="Ex : don, remboursement...">
+              </div>
+
+              <div class="d-grid">
+                <button class="btn btn-primary">Ajouter la recette</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="my-4">
+
+    <h2 class="h5 mb-3">Recettes du mois {year_month}</h2>
+
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th class="text-end">Montant</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows_html}
+        </tbody>
+      </table>
+    </div>
+    """
+
+    return render_page(body, "Recettes")
 
 
 
