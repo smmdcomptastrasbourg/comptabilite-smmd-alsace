@@ -390,6 +390,9 @@ def require_chef_or_admin():
 BASE_LAYOUT = """
 <!doctype html>
 <html lang="fr">
+def render_page(body, title="Comptabilité SMMD Alsace"):
+    return render_template_string(BASE_LAYOUT, body=body, title=title)
+
 <head>
   <meta charset="utf-8">
   <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
