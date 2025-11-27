@@ -20,7 +20,11 @@ from flask import (
 from google.cloud import firestore
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "odile+++")
+MASTER_PASSWORD = os.getenv("MASTER_PASSWORD", "odile+++")
 
+app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 # -------------------------------------------------------------------
 # Configuration générale
 # -------------------------------------------------------------------
@@ -537,7 +541,7 @@ def render_page(body, title="Comptabilité SMMD Alsace"):
 # Routes: Authentification
 # -------------------------------------------------------------------
 
-@@app.route("/login", methods=["GET", "POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
     # Si on soumet le formulaire (POST)
     if request.method == "POST":
