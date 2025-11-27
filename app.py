@@ -392,8 +392,10 @@ def require_login():
 
 def require_admin():
     user = current_user()
-    if not user or user["role"] != "admin":
+    print("DEBUG require_admin user =", user)
+    if not user or not user.get("isAdmin"):
         abort(403)
+
 
 def require_chef_or_admin():
     user = current_user()
