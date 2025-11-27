@@ -1,4 +1,8 @@
-Flask==3.0.0
-google-cloud-firestore==2.16.0
-Werkzeug==3.0.0
-python-dotenv==1.0.1
+Flask
+gunicorn
+google-cloud-firestore
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+python-dotenv
+werkzeug

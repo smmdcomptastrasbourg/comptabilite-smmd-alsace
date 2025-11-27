@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: comptabilite-smmd-alsace
+    env: python
+    region: frankfurt
+    buildCommand: ""
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false
