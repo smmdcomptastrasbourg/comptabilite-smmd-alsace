@@ -1971,82 +1971,95 @@ def chef_city_transactions_export():
     )
 
 # -------------------------------------------------------------------
-# Tableau de bord Admin
+# Tableau de bord admin (simple) + accès reset année
 # -------------------------------------------------------------------
 
 @app.route("/admin/")
-def admin_index():
+def admin_dashboard():
     require_login()
     require_admin()
-    user = current_user()
 
     today = date.today()
     school_year = get_school_year_for_date(today)
 
     body = f"""
-    <h1 class="mb-4">Espace administrateur</h1>
+    <h1 class="mb-4">Administration</h1>
 
-    <!-- Navigation admin -->
-    <div class="row g-3 mb-4">
-      <div class="col-md-4">
-        <a href="{url_for('admin_users')}" class="btn btn-outline-primary w-100">
-          👤 Admin utilisateurs
-        </a>
-      </div>
-      <div class="col-md-4">
-        <a href="{url_for('admin_transactions')}" class="btn btn-outline-secondary w-100">
-          📊 Admin compta
-        </a>
-      </div>
-      <div class="col-md-4">
-        <a href="{url_for('admin_categories')}" class="btn btn-outline-info w-100">
-          🧾 Catégories de dépenses
-        </a>
-      </div>
-    </div>
+    <div class="row g-4">
 
-    <hr class="my-4">
-
-    <!-- Gestion des données -->
-    <h2 class="h4 mb-3">Gestion des données</h2>
-
-    <div class="card border-danger">
-      <div class="card-header bg-danger text-white">
-        Réinitialiser l'année en cours
-      </div>
-      <div class="card-body">
-        <p class="mb-2">
-          Cette action supprime <strong>toutes les recettes et toutes les dépenses</strong>
-          de l'année scolaire <strong>{school_year}</strong> pour
-          <strong>toutes les villes</strong> et <strong>tous les utilisateurs</strong>.
-        </p>
-        <p class="text-danger fw-bold">
-          Elle est <u>irréversible</u>.
-        </p>
-
-        <form method="post" action="{url_for('admin_reset_year')}" class="mt-3">
-          <div class="mb-3">
-            <label class="form-label">Confirmer avec votre mot de passe admin :</label>
-            <input
-              type="password"
-              name="confirm_password"
-              class="form-control"
-              required
-            >
+      <!-- Bloc navigation admin -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">Gestion des utilisateurs et des catégories</h5>
           </div>
-          <button
-            type="submit"
-            class="btn btn-danger"
-            onclick="return confirm('Êtes-vous sûr de vouloir TOUT réinitialiser pour l\\'année scolaire {school_year} ? Cette action est irréversible.');"
-          >
-            🔥 Réinitialiser l'année en cours
-          </button>
-        </form>
+          <div class="card-body">
+            <p class="text-muted">
+              Accès rapide aux principales fonctions d'administration.
+            </p>
+            <div class="d-grid gap-2">
+              <a href="{url_for("admin_users")}" class="btn btn-outline-primary">
+                👤 Admin utilisateurs
+              </a>
+              <a href="{url_for("admin_categories")}" class="btn btn-outline-secondary">
+                🗂️ Catégories de dépenses
+              </a>
+              <a href="{url_for("admin_transactions")}" class="btn btn-outline-dark">
+                📊 Admin compta (toutes opérations)
+              </a>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <!-- Bloc reset année scolaire -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-danger text-white">
+            <h5 class="mb-0">Gestion des données</h5>
+          </div>
+          <div class="card-body">
+            <h6 class="mb-3">Réinitialiser l'année en cours</h6>
+            <p class="text-danger fw-bold">
+              Cette action supprime toutes les recettes, toutes les dépenses
+              et toutes les allocations de l'année scolaire {school_year}
+              pour toutes les villes et tous les utilisateurs.
+              Elle est <u>irréversible</u>.
+            </p>
+
+            <form method="post" action="{url_for("admin_reset_year")}">
+              <div class="mb-3">
+                <label class="form-label">
+                  Confirmer avec votre mot de passe admin :
+                </label>
+                <input
+                  type="password"
+                  name="admin_password"
+                  class="form-control"
+                  placeholder="Mot de passe admin"
+                  required
+                >
+              </div>
+              <div class="d-grid">
+                <button
+                  type="submit"
+                  class="btn btn-danger"
+                  onclick="return confirm('Confirmer la réinitialisation complète de l\\'année scolaire {school_year} ? Cette action est définitive.');"
+                >
+                  🔁 Réinitialiser l'année en cours
+                </button>
+              </div>
+            </form>
+
+          </div>
+        </div>
+      </div>
+
     </div>
     """
 
-    return render_page(body, "Admin")
+    return render_page(body, "Administration")
+
 
 
 
