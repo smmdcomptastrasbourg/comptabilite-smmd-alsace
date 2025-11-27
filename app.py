@@ -744,8 +744,8 @@ def dashboard():
 # Recettes
 # -------------------------------------------------------------------
 
-@app.route("/income", methods=["GET", "POST"])
-def income():
+@app.route("/expense", methods=["GET", "POST"])
+def expense():
     if not session.get("user_id"):
         return redirect(url_for("login"))
     user = current_user()
@@ -753,131 +753,166 @@ def income():
         return redirect(url_for("login"))
 
     today = date.today()
-    school_year = get_school_year_for_date(today)
-    year_month = get_year_month(today)
+    categories = get_active_expense_categories()
 
-    # --- Traitement du formulaire "allocation mensuelle" ---
-    if request.method == "POST" and request.form.get("form_type") == "allocation":
-        try:
-            monthly_amount = float(request.form.get("monthly_amount").replace(",", "."))
-        except Exception:
-            flash("Montant invalide.", "error")
-        else:
-            if monthly_amount <= 0:
-                flash("Le montant doit être positif.", "error")
-            else:
-                # 1) Met à jour la config d'allocation pour l'année scolaire en cours
-                upsert_allocation_config(user["id"], user["cityId"], school_year, monthly_amount)
+    if request.method == "POST":
+        form_type = request.form.get("form_type")
+        desc = request.form.get("description", "").strip() or "Dépense"
+        category_id = request.form.get("category_id") or None
+        category_name = None
 
-                # 2) Met à jour (ou crée) la transaction d'allocation pour le MOIS EN COURS
-                alloc_query = (
-                    db.collection(TRANSACTIONS_COLLECTION)
-                    .where("userId", "==", user["id"])
-                    .where("cityId", "==", user["cityId"])
-                    .where("schoolYear", "==", school_year)
-                    .where("yearMonth", "==", year_month)
-                    .where("source", "==", "allocation_mensuelle")
-                    .limit(1)
-                )
+        if category_id:
+            cat_doc = db.collection(EXPENSE_CATEGORIES_COLLECTION).document(category_id).get()
+            if cat_doc.exists:
+                category_name = cat_doc.to_dict().get("name")
 
-                existing_alloc_doc = None
-                for doc in alloc_query.stream():
-                    existing_alloc_doc = doc
-                    break
-
-                if existing_alloc_doc:
-                    # On met simplement à jour le montant de la transaction existante
-                    existing_alloc_doc.reference.update(
-                        {
-                            "amount": float(monthly_amount),
-                            "updatedAt": utc_now_iso(),
-                        }
-                    )
-                else:
-                    # Aucune transaction pour ce mois : on la crée
-                    create_transaction(
-                        city_id=user["cityId"],
-                        user_id=user["id"],
-                        d=today,
-                        ttype="income",
-                        source="allocation_mensuelle",
-                        amount=float(monthly_amount),
-                        payment_method="virement",
-                        is_advance=False,
-                        advance_status=None,
-                        description=f"Allocation mensuelle {year_month}",
-                    )
-
-                flash(
-                    "Allocation mensuelle mise à jour pour le mois en cours et les mois suivants de l'année scolaire.",
-                    "success",
-                )
-
-    # --- Traitement du formulaire "recette ponctuelle" ---
-    if request.method == "POST" and request.form.get("form_type") == "extra_income":
-        desc = request.form.get("description", "").strip() or "Recette ponctuelle"
         try:
             amount = float(request.form.get("amount").replace(",", "."))
         except Exception:
             flash("Montant invalide.", "error")
-        else:
-            if amount <= 0:
-                flash("Le montant doit être positif.", "error")
-            else:
-                create_transaction(
-                    city_id=user["cityId"],
-                    user_id=user["id"],
-                    d=today,
-                    ttype="income",
-                    source="recette_ponctuelle",
-                    amount=amount,
-                    payment_method="autre",
-                    is_advance=False,
-                    advance_status=None,
-                    description=desc,
-                )
-                flash(f"Recette ponctuelle de {amount:.2f} € ajoutée.", "success")
+            return redirect(url_for("expense"))
 
-    # On recharge la config après éventuelle mise à jour
-    config = get_allocation_config(user["id"], school_year)
-    monthly_amount = config["monthlyAmount"] if config else None
+        if amount <= 0:
+            flash("Le montant doit être positif.", "error")
+            return redirect(url_for("expense"))
 
-    # Petit bloc affichant clairement le montant actuel
-    if monthly_amount is not None:
-        current_alloc_html = f"<p>Montant actuel de l'allocation : <strong>{monthly_amount:.2f} €</strong></p>"
-    else:
-        current_alloc_html = "<p>Aucune allocation mensuelle définie pour cette année scolaire.</p>"
+        # Toujours stocké comme montant négatif (dépense)
+        amount = -abs(amount)
+
+        if form_type == "cb_ville":
+            create_transaction(
+                city_id=user["cityId"],
+                user_id=user["id"],
+                d=today,
+                ttype="expense",
+                source="depense_carte_ville",
+                amount=amount,
+                payment_method="carte_ville",
+                is_advance=False,
+                advance_status=None,
+                description=desc,
+                category_id=category_id,
+                category_name=category_name,
+            )
+            flash("Dépense CB maison enregistrée.", "success")
+
+        elif form_type == "avance":
+            payment_method = request.form.get("payment_method")
+            create_transaction(
+                city_id=user["cityId"],
+                user_id=user["id"],
+                d=today,
+                ttype="expense",
+                source="avance_frais_personnelle",
+                amount=amount,
+                payment_method=payment_method,
+                is_advance=True,
+                advance_status="en_attente",
+                description=desc,
+                category_id=category_id,
+                category_name=category_name,
+            )
+            flash("Avance de frais enregistrée.", "success")
+
+        return redirect(url_for("expense"))
+
+    # Options de catégories pour le HTML
+    category_options = ""
+    for c in categories:
+        category_options += f'<option value="{c["id"]}">{c["name"]}</option>'
 
     body = f"""
-      <h1>Recettes</h1>
-      <h2>Allocation mensuelle (année scolaire {school_year})</h2>
+    <h1 class="mb-4">Dépenses</h1>
 
-      {current_alloc_html}
+    <div class="row g-4">
+      <!-- Dépense CB maison -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-danger text-white">
+            <h5 class="mb-0">Dépense CB de la maison</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="form_type" value="cb_ville">
 
-      <form method="post" class="mb-4">
-        <input type="hidden" name="form_type" value="allocation">
-        <div class="mb-3">
-          <label class="form-label">Montant mensuel (€) :</label><br>
-          <input class="form-control" type="text" name="monthly_amount" value="{monthly_amount if monthly_amount else ''}" required>
-        </div>
-        <button class="btn btn-primary" type="submit">Enregistrer</button>
-      </form>
+              <div class="mb-3">
+                <label class="form-label">Montant (€)</label>
+                <input type="text" name="amount" class="form-control" required>
+              </div>
 
-      <h2>Recette ponctuelle ({year_month})</h2>
-      <form method="post">
-        <input type="hidden" name="form_type" value="extra_income">
-        <div class="mb-3">
-          <label class="form-label">Montant (€) :</label><br>
-          <input class="form-control" type="text" name="amount" required>
+              <div class="mb-3">
+                <label class="form-label">Catégorie</label>
+                <select name="category_id" class="form-select" required>
+                  <option value="">-- choisir --</option>
+                  {category_options}
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Description</label>
+                <input type="text" name="description" class="form-control" placeholder="Ex : courses, plein, etc.">
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-danger">Enregistrer la dépense</button>
+              </div>
+            </form>
+          </div>
         </div>
-        <div class="mb-3">
-          <label class="form-label">Description :</label><br>
-          <input class="form-control" type="text" name="description">
+      </div>
+
+      <!-- Avance de frais -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-warning text-dark">
+            <h5 class="mb-0">Avance de frais</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="form_type" value="avance">
+
+              <div class="mb-3">
+                <label class="form-label">Montant (€)</label>
+                <input type="text" name="amount" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Catégorie</label>
+                <select name="category_id" class="form-select" required>
+                  <option value="">-- choisir --</option>
+                  {category_options}
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Moyen de paiement</label>
+                <select name="payment_method" class="form-select">
+                  <option value="cb_perso">CB personnelle</option>
+                  <option value="cheque">Chèque</option>
+                  <option value="especes">Espèces</option>
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Description</label>
+                <input type="text" name="description" class="form-control" placeholder="Ex : avance sur courses">
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-warning">Enregistrer l'avance</button>
+              </div>
+            </form>
+          </div>
         </div>
-        <button class="btn btn-success" type="submit">Ajouter</button>
-      </form>
+      </div>
+    </div>
+
+    <p class="mt-3 text-muted small">
+      Les catégories de dépenses sont définies par l'administrateur.
+    </p>
     """
-    return render_page(body, "Recettes")
+    return render_page(body, "Dépenses")
+
 
 # -------------------------------------------------------------------
 # Dépenses (avec catégories)
@@ -915,6 +950,7 @@ def expense():
             flash("Le montant doit être positif.", "error")
             return redirect(url_for("expense"))
 
+        # Toujours stocké comme montant négatif (dépense)
         amount = -abs(amount)
 
         if form_type == "cb_ville":
@@ -932,7 +968,7 @@ def expense():
                 category_id=category_id,
                 category_name=category_name,
             )
-            flash("Dépense CB ville enregistrée.", "success")
+            flash("Dépense CB maison enregistrée.", "success")
 
         elif form_type == "avance":
             payment_method = request.form.get("payment_method")
@@ -960,46 +996,97 @@ def expense():
         category_options += f'<option value="{c["id"]}">{c["name"]}</option>'
 
     body = f"""
-      <h1>Dépenses</h1>
+    <h1 class="mb-4">Dépenses</h1>
 
-      <h2>Dépense CB de la maison</h2>
-      <form method="post">
-        <input type="hidden" name="form_type" value="cb_ville">
-        <label>Montant (€):</label><br>
-        <input type="text" name="amount" required><br>
-        <label>Catégorie :</label><br>
-        <select name="category_id" required>
-          <option value="">-- choisir --</option>
-          {category_options}
-        </select><br>
-        <label>Description:</label><br>
-        <input type="text" name="description"><br>
-        <button type="submit">Enregistrer</button>
-      </form>
+    <div class="row g-4">
+      <!-- Dépense CB maison -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-danger text-white">
+            <h5 class="mb-0">Dépense CB de la maison</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="form_type" value="cb_ville">
 
-      <h2>Avance de frais</h2>
-      <form method="post">
-        <input type="hidden" name="form_type" value="avance">
-        <label>Montant (€):</label><br>
-        <input type="text" name="amount" required><br>
-        <label>Catégorie :</label><br>
-        <select name="category_id" required>
-          <option value="">-- choisir --</option>
-          {category_options}
-        </select><br>
-        <label>Moyen de paiement :</label><br>
-        <select name="payment_method">
-          <option value="cb_perso">CB personnelle</option>
-          <option value="cheque">Chèque</option>
-          <option value="especes">Espèces</option>
-        </select><br>
-        <label>Description:</label><br>
-        <input type="text" name="description"><br>
-        <button type="submit">Enregistrer</button>
-      </form>
-      <p><em>Les catégories sont définies par l'administrateur.</em></p>
+              <div class="mb-3">
+                <label class="form-label">Montant (€)</label>
+                <input type="text" name="amount" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Catégorie</label>
+                <select name="category_id" class="form-select" required>
+                  <option value="">-- choisir --</option>
+                  {category_options}
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Description</label>
+                <input type="text" name="description" class="form-control" placeholder="Ex : courses, plein, etc.">
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-danger">Enregistrer la dépense</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Avance de frais -->
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-warning text-dark">
+            <h5 class="mb-0">Avance de frais</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="form_type" value="avance">
+
+              <div class="mb-3">
+                <label class="form-label">Montant (€)</label>
+                <input type="text" name="amount" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Catégorie</label>
+                <select name="category_id" class="form-select" required>
+                  <option value="">-- choisir --</option>
+                  {category_options}
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Moyen de paiement</label>
+                <select name="payment_method" class="form-select">
+                  <option value="cb_perso">CB personnelle</option>
+                  <option value="cheque">Chèque</option>
+                  <option value="especes">Espèces</option>
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Description</label>
+                <input type="text" name="description" class="form-control" placeholder="Ex : avance sur courses">
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-warning">Enregistrer l'avance</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="mt-3 text-muted small">
+      Les catégories de dépenses sont définies par l'administrateur.
+    </p>
     """
     return render_page(body, "Dépenses")
+
 
 # -------------------------------------------------------------------
 # Mes opérations (historique personnel) + annulation dernière opération
