@@ -642,22 +642,40 @@ def change_password_first():
 
 @app.route("/")
 def dashboard():
-    if not session.get("user_id"):
+    if not session.get("user_id") or session.get("role") == "admin":
         return redirect(url_for("login"))
+
     user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
     today = date.today()
-    school_year = get_school_year_for_date(today)
     year_month = get_year_month(today)
+    school_year = get_school_year_for_date(today)
 
-    ensure_allocation_transaction_for_month(user, today)
+    # Solde de la ville
+    city = user["cityId"]
+    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", city)
+    total = 0
+    for d in q.stream():
+        tr = d.to_dict()
+        if tr["type"] == "income":
+            total += tr["amount"]
+        else:
+            total -= tr["amount"]
 
-    city_balance = get_city_annual_balance(user["cityId"], school_year)
-    personal_balance = get_personal_monthly_balance(user["id"], year_month)
+    # Solde perso du mois
+    q2 = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("userId", "==", user["id"])
+        .where("yearMonth", "==", year_month)
+    )
+    perso = 0
+    for d in q2.stream():
+        tr = d.to_dict()
+        if tr["type"] == "income":
+            perso += tr["amount"]
+        else:
+            perso -= tr["amount"]
 
-        body = f"""
+    body = f"""
     <h1 class="mb-4">Tableau de bord</h1>
 
     <div class="row g-4">
@@ -684,7 +702,9 @@ def dashboard():
       </div>
     </div>
     """
+
     return render_page(body, "Tableau de bord")
+
 
 # -------------------------------------------------------------------
 # Recettes
