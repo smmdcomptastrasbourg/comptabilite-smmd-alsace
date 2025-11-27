@@ -390,19 +390,16 @@ def require_chef_or_admin():
 BASE_LAYOUT = """
 <!doctype html>
 <html lang="fr">
-def render_page(body, title="Comptabilité SMMD Alsace"):
-    return render_template_string(BASE_LAYOUT, body=body, title=title)
-
 <head>
   <meta charset="utf-8">
   <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <!-- PWA manifest -->
+  <!-- PWA -->
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <meta name="theme-color" content="#0d6efd">
 
-  <!-- Bootstrap 5 -->
+  <!-- Bootstrap CSS -->
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
     rel="stylesheet"
@@ -411,118 +408,36 @@ def render_page(body, title="Comptabilité SMMD Alsace"):
   >
 </head>
 
-
 <body class="bg-light">
 
-<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('dashboard') }}">Compta SMMD</a>
-
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-
-    <div class="collapse navbar-collapse" id="navbarMain">
-      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-
-        {% if session.user_id %}
-
-          {% if session.role == 'admin' %}
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_transactions') }}">Admin compta</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_categories') }}">Catégories dépenses</a>
-            </li>
-
-          {% else %}
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('dashboard') }}">Tableau de bord</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('income') }}">Recettes</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('expense') }}">Dépenses</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('my_operations') }}">Mes opérations</a>
-            </li>
-
-            {% if session.role == 'chef' %}
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_city_transactions') }}">Compta maison</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_advances') }}">Avances</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_export') }}">Export ville</a>
-              </li>
-            {% endif %}
-          {% endif %}
-
-          <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('logout') }}">Déconnexion</a>
-          </li>
-
-        {% else %}
-          <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('login') }}">Connexion</a>
-          </li>
-        {% endif %}
-      </ul>
-
-      {% if session.user_id %}
-        <span class="navbar-text text-white">
-          Bonjour {{ session.short_name }}
-        </span>
-      {% endif %}
-    </div>
+  <div class="container my-4">
+    {{ body|safe }}
   </div>
-</nav>
 
-<div class="container my-4">
+  <!-- Bootstrap JS -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"
+  ></script>
 
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      {% for category, msg in messages %}
-        <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
-          {{ msg }}
-          <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-        </div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
-
-  {{ body|safe }}
-
-</div>
-
-<script
-  src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-  integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-  crossorigin="anonymous"
-></script>
-
-<script>
-  // Enregistrement du service worker pour la PWA
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", function() {
-      navigator.serviceWorker.register("/service-worker.js")
-        .catch(function(error) {
-          console.log("Service worker registration failed:", error);
-        });
-    });
-  }
-</script>
+  <!-- Service Worker -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function() {
+        navigator.serviceWorker.register("/service-worker.js")
+          .then(() => console.log("SW registered"))
+          .catch(error => console.log("SW registration failed:", error));
+      });
+    }
+  </script>
 
 </body>
 </html>
 """
+def render_page(body, title="Comptabilité SMMD Alsace"):
+    return render_template_string(BASE_LAYOUT, body=body, title=title)
+
 
 
 # -------------------------------------------------------------------
