@@ -1969,7 +1969,7 @@ def chef_city_transactions_export():
     )
 
 # -------------------------------------------------------------------
-# Admin : Tableau de bord
+# Tableau de bord Admin
 # -------------------------------------------------------------------
 
 @app.route("/admin/")
@@ -1981,150 +1981,71 @@ def admin_index():
     today = date.today()
     school_year = get_school_year_for_date(today)
 
-    # Petit résumé global pour l'année scolaire en cours
-    total_all = 0.0
-    count_all = 0
-
-    q = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("schoolYear", "==", school_year)
-    )
-
-    try:
-        docs = list(q.stream())
-    except Exception:
-        docs = []
-        flash("Firestore demande peut-être un index pour cette requête (admin_index).", "error")
-
-    for doc in docs:
-        t = doc.to_dict()
-        amount = float(t.get("amount", 0.0))
-        total_all += amount
-        count_all += 1
-
-    # Liens principaux de l'admin
-    url_users = url_for("admin_users")
-    url_compta = url_for("admin_transactions")
-    url_categories = url_for("admin_expense_categories") if "admin_expense_categories" in app.view_functions else None
-
-    reset_year_url = url_for("admin_reset_year")
-
     body = f"""
-    <h1 class="mb-4">Admin – Tableau de bord</h1>
+    <h1 class="mb-4">Espace administrateur</h1>
 
-    <div class="row g-4 mb-3">
-      <div class="col-lg-4">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-2">Année scolaire en cours</h5>
-            <p class="mb-1"><strong>{school_year}</strong></p>
-            <p class="mb-1"><strong>Nombre d'opérations :</strong> {count_all}</p>
-            <p class="mb-0"><strong>Total :</strong> {total_all:.2f} €</p>
-          </div>
-        </div>
+    <!-- Navigation admin -->
+    <div class="row g-3 mb-4">
+      <div class="col-md-4">
+        <a href="{url_for('admin_users')}" class="btn btn-outline-primary w-100">
+          👤 Admin utilisateurs
+        </a>
       </div>
-
-      <div class="col-lg-4">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-3">Gestion des données</h5>
-            <p><a href="{url_compta}" class="btn btn-outline-primary btn-sm w-100 mb-2">
-              Voir / annuler / exporter les opérations
-            </a></p>
-            <p><a href="{url_users}" class="btn btn-outline-secondary btn-sm w-100 mb-2">
-              Gérer les utilisateurs
-            </a></p>
-            {"<p><a href='" + url_categories + "' class='btn btn-outline-secondary btn-sm w-100 mb-2'>Gérer les catégories de dépenses</a></p>" if url_categories else ""}
-          </div>
-        </div>
+      <div class="col-md-4">
+        <a href="{url_for('admin_transactions')}" class="btn btn-outline-secondary w-100">
+          📊 Admin compta
+        </a>
       </div>
+      <div class="col-md-4">
+        <a href="{url_for('admin_categories')}" class="btn btn-outline-info w-100">
+          🧾 Catégories de dépenses
+        </a>
+      </div>
+    </div>
 
-      <div class="col-lg-4">
-        <div class="card shadow-sm border-0 border-danger">
-          <div class="card-header bg-danger text-white">
-            <h5 class="mb-0">Réinitialiser l'année en cours</h5>
+    <hr class="my-4">
+
+    <!-- Gestion des données -->
+    <h2 class="h4 mb-3">Gestion des données</h2>
+
+    <div class="card border-danger">
+      <div class="card-header bg-danger text-white">
+        Réinitialiser l'année en cours
+      </div>
+      <div class="card-body">
+        <p class="mb-2">
+          Cette action supprime <strong>toutes les recettes et toutes les dépenses</strong>
+          de l'année scolaire <strong>{school_year}</strong> pour
+          <strong>toutes les villes</strong> et <strong>tous les utilisateurs</strong>.
+        </p>
+        <p class="text-danger fw-bold">
+          Elle est <u>irréversible</u>.
+        </p>
+
+        <form method="post" action="{url_for('admin_reset_year')}" class="mt-3">
+          <div class="mb-3">
+            <label class="form-label">Confirmer avec votre mot de passe admin :</label>
+            <input
+              type="password"
+              name="confirm_password"
+              class="form-control"
+              required
+            >
           </div>
-          <div class="card-body">
-            <p class="small text-muted">
-              Cette action supprime <strong>toutes les recettes et toutes les dépenses</strong>
-              de l'année scolaire <strong>{school_year}</strong> pour toutes les villes et tous les utilisateurs.
-              Elle est irréversible.
-            </p>
-            <form method="post" action="{reset_year_url}">
-              <div class="mb-2">
-                <label class="form-label">Confirmer avec votre mot de passe admin :</label>
-                <input type="password" name="confirm_password" class="form-control" required>
-              </div>
-              <button
-                type="submit"
-                class="btn btn-danger btn-sm w-100"
-                onclick="return confirm('Confirmer la suppression de toutes les opérations de cette année scolaire ?');"
-              >
-                Réinitialiser l'année en cours
-              </button>
-            </form>
-          </div>
-        </div>
+          <button
+            type="submit"
+            class="btn btn-danger"
+            onclick="return confirm('Êtes-vous sûr de vouloir TOUT réinitialiser pour l\\'année scolaire {school_year} ? Cette action est irréversible.');"
+          >
+            🔥 Réinitialiser l'année en cours
+          </button>
+        </form>
       </div>
     </div>
     """
 
-    return render_page(body, "Admin – Tableau de bord")
+    return render_page(body, "Admin")
 
-# -------------------------------------------------------------------
-# Admin : Réinitialiser l'année scolaire en cours (tout remettre à zéro)
-# -------------------------------------------------------------------
-
-@app.route("/admin/reset-year", methods=["POST"])
-def admin_reset_year():
-    require_login()
-    require_admin()
-    user = current_user()
-
-    confirm_password = request.form.get("confirm_password", "")
-
-    # Vérifier le mot de passe admin
-    password_hash = user.get("passwordHash")
-    if not password_hash or not check_password_hash(password_hash, confirm_password):
-        flash("Mot de passe incorrect. Réinitialisation annulée.", "error")
-        return redirect(url_for("admin_index"))
-
-    today = date.today()
-    school_year = get_school_year_for_date(today)
-
-    # 1) Supprimer toutes les transactions (recettes + dépenses) de l'année scolaire
-    tx_query = db.collection(TRANSACTIONS_COLLECTION).where("schoolYear", "==", school_year)
-
-    deleted_tx = 0
-    try:
-        for doc in tx_query.stream():
-            doc.reference.delete()
-            deleted_tx += 1
-    except Exception:
-        flash("Erreur lors de la suppression des opérations. Vérifie Firestore ou les index.", "error")
-        return redirect(url_for("admin_index"))
-
-    # 2) Supprimer toutes les allocations de l'année scolaire
-    alloc_query = (
-        db.collection(ALLOCATIONS_COLLECTION)
-        .where("schoolYear", "==", school_year)
-    )
-
-    deleted_alloc = 0
-    try:
-        for doc in alloc_query.stream():
-            doc.reference.delete()
-            deleted_alloc += 1
-    except Exception:
-        flash("Erreur lors de la suppression des allocations. Vérifie Firestore ou les index.", "error")
-        return redirect(url_for("admin_index"))
-
-    flash(
-        f"Toute l'année scolaire {school_year} a été réinitialisée : "
-        f"{deleted_tx} opérations supprimées et {deleted_alloc} allocations supprimées.",
-        "success",
-    )
-    return redirect(url_for("admin_index"))
 
 
 # -------------------------------------------------------------------
