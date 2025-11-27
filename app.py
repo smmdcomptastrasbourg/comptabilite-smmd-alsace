@@ -1227,7 +1227,10 @@ def my_operations():
     try:
         tx_docs = list(tx_query.stream())
     except Exception:
-        flash("Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.", "error")
+        flash(
+            "Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.",
+            "error",
+        )
         tx_docs = []
 
     rows_html = ""
@@ -1260,10 +1263,14 @@ def my_operations():
         else:
             source_label = source
 
+        # On autorise l'annulation pour toutes les opérations sauf allocation
         if source != "allocation_mensuelle":
             last_cancellable_tx_id = tx_id
 
         category_name = t.get("categoryName") or ""
+        payment_method = t.get("paymentMethod") or ""
+        desc = t.get("description") or ""
+        advance_status = t.get("advanceStatus") or ""
 
         rows_html += f"""
           <tr>
@@ -1271,10 +1278,10 @@ def my_operations():
             <td>{type_label}</td>
             <td>{source_label}</td>
             <td>{category_name}</td>
-            <td>{t.get('paymentMethod') or ''}</td>
-            <td>{amount:.2f}</td>
-            <td>{t.get('description') or ''}</td>
-            <td>{t.get('advanceStatus') or ''}</td>
+            <td>{payment_method}</td>
+            <td class="text-end">{amount:.2f} €</td>
+            <td>{desc}</td>
+            <td>{advance_status}</td>
           </tr>
         """
 
@@ -1285,47 +1292,99 @@ def my_operations():
     if last_cancellable_tx_id:
         cancel_url = url_for("cancel_last_operation")
         cancel_block = f"""
-          <form method="post" action="{cancel_url}" style="margin-top:1rem;">
+          <form method="post" action="{cancel_url}" class="mt-3">
             <input type="hidden" name="year" value="{selected_year}">
             <input type="hidden" name="month" value="{selected_month}">
-            <button type="submit" onclick="return confirm('Annuler définitivement la dernière opération de ce mois ?');">
-              Annuler la dernière opération de ce mois
+            <button
+              type="submit"
+              class="btn btn-outline-danger btn-sm"
+              onclick="return confirm('Annuler définitivement ma dernière opération ?');"
+            >
+              Annuler ma dernière opération
             </button>
           </form>
         """
 
+    if not rows_html:
+        rows_html = "<tr><td colspan='8' class='text-center text-muted'>Aucune opération pour ce mois.</td></tr>"
+
     body = f"""
-      <h1>Mes opérations</h1>
-      <p>Année scolaire : {school_year}</p>
+    <h1 class="mb-4">Mes opérations</h1>
 
-      <form method="get">
-        <label>Année :</label>
-        <input type="number" name="year" value="{selected_year}" min="2000" max="2100" required>
-        <label>Mois :</label>
-        <input type="number" name="month" value="{selected_month}" min="1" max="12" required>
-        <button type="submit">Afficher</button>
-      </form>
+    <div class="row g-4 mb-3">
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-body">
+            <h5 class="card-title mb-2">Période affichée</h5>
+            <p class="mb-1">Année scolaire : <strong>{school_year}</strong></p>
+            <p class="mb-0">Mois : <strong>{year_month}</strong></p>
+          </div>
+        </div>
+      </div>
 
-      {cancel_block}
+      <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+          <div class="card-body">
+            <form method="get" class="row g-2 align-items-end">
+              <div class="col-4">
+                <label class="form-label mb-1">Année</label>
+                <input type="number" name="year" value="{selected_year}" min="2000" max="2100" class="form-control" required>
+              </div>
+              <div class="col-4">
+                <label class="form-label mb-1">Mois</label>
+                <input type="number" name="month" value="{selected_month}" min="1" max="12" class="form-control" required>
+              </div>
+              <div class="col-4 d-grid">
+                <button type="submit" class="btn btn-primary">Afficher</button>
+              </div>
+            </form>
+            {cancel_block}
+          </div>
+        </div>
+      </div>
+    </div>
 
-      <h2>Opérations pour {year_month}</h2>
-      <table>
-        <tr>
-          <th>Date</th>
-          <th>Type</th>
-          <th>Source</th>
-          <th>Catégorie</th>
-          <th>Moyen de paiement</th>
-          <th>Montant (€)</th>
-          <th>Description</th>
-          <th>Statut avance</th>
-        </tr>
-        {rows_html if rows_html else "<tr><td colspan='8'>Aucune opération pour ce mois.</td></tr>"}
-      </table>
+    <div class="card shadow-sm border-0 mb-3">
+      <div class="card-body">
+        <h5 class="card-title mb-2">Total du mois</h5>
+        <p class="mb-0">
+          <strong>{total:.2f} €</strong>
+        </p>
+        <p class="text-muted mb-0">
+          Les recettes apparaissent en positif, les dépenses en négatif.
+        </p>
+      </div>
+    </div>
 
-      <h3>Total du mois : {total:.2f} €</h3>
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-light">
+        <h5 class="mb-0">Opérations pour {year_month}</h5>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm mb-0 align-middle">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Catégorie</th>
+                <th>Moyen de paiement</th>
+                <th class="text-end">Montant (€)</th>
+                <th>Description</th>
+                <th>Statut avance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows_html}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     """
     return render_page(body, "Mes opérations")
+
 
 @app.route("/my-operations/cancel-last", methods=["POST"])
 def cancel_last_operation():
@@ -1358,7 +1417,10 @@ def cancel_last_operation():
     try:
         tx_docs = list(tx_query.stream())
     except Exception:
-        flash("Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.", "error")
+        flash(
+            "Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.",
+            "error",
+        )
         return redirect(url_for("my_operations", year=year, month=month))
 
     last_cancellable_doc = None
@@ -1385,6 +1447,7 @@ def cancel_last_operation():
         "success",
     )
     return redirect(url_for("my_operations", year=year, month=month))
+
 
 # -------------------------------------------------------------------
 # Interface chef : Avances
