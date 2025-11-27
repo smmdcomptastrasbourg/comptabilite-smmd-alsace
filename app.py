@@ -2179,10 +2179,7 @@ def admin_transactions():
     try:
         docs = list(q.stream())
     except Exception:
-        flash(
-            "Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.",
-            "error",
-        )
+        flash("Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.", "error")
         docs = []
 
     rows = ""
@@ -2206,7 +2203,6 @@ def admin_transactions():
         desc = t.get("description") or ""
         adv_status = t.get("advanceStatus") or ""
         cat_name = t.get("categoryName") or ""
-        date_str = t.get("date") or ""
 
         delete_url = url_for(
             "admin_delete_transaction",
@@ -2221,27 +2217,24 @@ def admin_transactions():
           <tr>
             <td>{tx_id}</td>
             <td>{city_label}</td>
-            <td>{date_str}</td>
+            <td>{t.get('date')}</td>
             <td>{ttype}</td>
             <td>{source}</td>
             <td>{cat_name}</td>
             <td>{pay}</td>
-            <td class="text-end">{amount:.2f} €</td>
+            <td>{amount:.2f}</td>
             <td>{uname}</td>
             <td>{adv_status}</td>
             <td>{desc}</td>
-            <td class="text-end">
+            <td>
               <a href="{delete_url}"
                  class="btn btn-sm btn-outline-danger"
                  onclick="return confirm('Supprimer définitivement cette opération ?');">
-                Annuler
+                 Annuler
               </a>
             </td>
           </tr>
         """
-
-    no_rows_html = "<tr><td colspan='12' class='text-center text-muted'>Aucune opération pour ce filtre.</td></tr>"
-    tbody_rows = rows or no_rows_html
 
     export_url = url_for(
         "admin_transactions_export",
@@ -2251,105 +2244,176 @@ def admin_transactions():
         month=month,
     )
 
-    ville_label = "toutes" if city == "all" else city
-
     body = f"""
-    <h1 class="mb-4">Admin compta – toutes opérations</h1>
+      <h1 class="mb-4">Admin compta – toutes opérations</h1>
 
-    <div class="row g-4 mb-3">
-      <div class="col-lg-7">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-3">Filtres</h5>
-            <form method="get" class="row g-2 align-items-end">
-              <div class="col-12">
-                <label class="form-label mb-1">Ville</label>
-                <select name="city" class="form-select">
-                  <option value="all" {'selected' if city == 'all' else ''}>Toutes</option>
-                  <option value="strasbourg" {'selected' if city == 'strasbourg' else ''}>Strasbourg</option>
-                  <option value="colmar" {'selected' if city == 'colmar' else ''}>Colmar</option>
-                </select>
-              </div>
+      <form method="get" class="row g-3 mb-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Ville</label>
+          <select name="city" class="form-select">
+            <option value="all" {"selected" if city == "all" else ""}>Toutes</option>
+            <option value="strasbourg" {"selected" if city == "strasbourg" else ""}>Strasbourg</option>
+            <option value="colmar" {"selected" if city == "colmar" else ""}>Colmar</option>
+          </select>
+        </div>
 
-              <div class="col-12 mt-2">
-                <span class="form-label d-block mb-1">Mode</span>
-                <div class="form-check form-check-inline">
-                  <input class="form-check-input" type="radio" name="mode" value="month" {'checked' if mode == 'month' else ''}>
-                  <label class="form-check-label">Mois</label>
-                </div>
-                <div class="form-check form-check-inline">
-                  <input class="form-check-input" type="radio" name="mode" value="schoolyear" {'checked' if mode == 'schoolyear' else ''}>
-                  <label class="form-check-label">Année scolaire</label>
-                </div>
-              </div>
-
-              <div class="col-4">
-                <label class="form-label mb-1">Année</label>
-                <input type="number" name="year" value="{year}" min="2000" max="2100" class="form-control" required>
-              </div>
-              <div class="col-4">
-                <label class="form-label mb-1">Mois</label>
-                <input type="number" name="month" value="{month}" min="1" max="12" class="form-control">
-              </div>
-              <div class="col-4 d-grid">
-                <button type="submit" class="btn btn-primary">Afficher</button>
-              </div>
-            </form>
+        <div class="col-md-3">
+          <label class="form-label">Mode</label><br>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="mode" value="month" {"checked" if mode == "month" else ""}>
+            <label class="form-check-label">Mois</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="mode" value="schoolyear" {"checked" if mode == "schoolyear" else ""}>
+            <label class="form-check-label">Année scolaire</label>
           </div>
         </div>
-      </div>
 
-      <div class="col-lg-5">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-2">Résumé</h5>
-            <p class="mb-1"><strong>Filtre :</strong> {subtitle}</p>
-            <p class="mb-1"><strong>Ville :</strong> {ville_label}</p>
-            <p class="mb-1"><strong>Nombre d'opérations :</strong> {count}</p>
-            <p class="mb-0"><strong>Total :</strong> {total:.2f} €</p>
-          </div>
+        <div class="col-md-2">
+          <label class="form-label">Année</label>
+          <input type="number" name="year" class="form-control" value="{year}" min="2000" max="2100" required>
         </div>
-      </div>
-    </div>
 
-    <div class="mb-3">
-      <a href="{export_url}" class="btn btn-outline-secondary btn-sm">
-        📥 Exporter en CSV (mêmes filtres)
-      </a>
-    </div>
-
-    <div class="card shadow-sm border-0">
-      <div class="card-header bg-light">
-        <h5 class="mb-0">Opérations – {subtitle}</h5>
-      </div>
-      <div class="card-body p-0">
-        <div class="table-responsive">
-          <table class="table table-sm mb-0 align-middle">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Ville</th>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Source</th>
-                <th>Catégorie</th>
-                <th>Moyen</th>
-                <th class="text-end">Montant (€)</th>
-                <th>Utilisateur</th>
-                <th>Statut avance</th>
-                <th>Description</th>
-                <th class="text-end">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tbody_rows}
-            </tbody>
-          </table>
+        <div class="col-md-2">
+          <label class="form-label">Mois</label>
+          <input type="number" name="month" class="form-control" value="{month}" min="1" max="12">
         </div>
+
+        <div class="col-md-2">
+          <button type="submit" class="btn btn-primary w-100">Afficher</button>
+        </div>
+      </form>
+
+      <div class="mb-3">
+        <p class="mb-1"><strong>Filtre :</strong> {subtitle} – Ville : {"toutes" if city == "all" else city}</p>
+        <p class="mb-1"><strong>Nombre d'opérations :</strong> {count}</p>
+        <p class="mb-1"><strong>Total :</strong> {total:.2f} €</p>
       </div>
-    </div>
+
+      <p>
+        <a href="{export_url}" class="btn btn-outline-success btn-sm">
+          📥 Exporter en CSV (mêmes filtres)
+        </a>
+      </p>
+
+      <div class="table-responsive">
+        <table class="table table-sm table-striped align-middle">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Ville</th>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Source</th>
+              <th>Catégorie</th>
+              <th>Moyen</th>
+              <th>Montant (€)</th>
+              <th>Utilisateur</th>
+              <th>Statut avance</th>
+              <th>Description</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows if rows else "<tr><td colspan='12' class='text-center text-muted'>Aucune opération pour ce filtre.</td></tr>"}
+          </tbody>
+        </table>
+      </div>
     """
     return render_page(body, "Admin compta")
+
+
+@app.route("/admin/transactions/export")
+def admin_transactions_export():
+    require_login()
+    require_admin()
+    today = date.today()
+
+    city = request.args.get("city", "all")
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION)
+
+    if city != "all":
+        q = q.where("cityId", "==", city)
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{school_year}.csv"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{year_month}.csv"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour l'export (admin_transactions_export).", "error")
+        return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(
+        ["id", "cityId", "date", "yearMonth", "schoolYear",
+         "type", "source", "amount", "paymentMethod",
+         "categoryName", "description", "userFullName",
+         "isAdvance", "advanceStatus"]
+    )
+
+    for doc in docs:
+        t = doc.to_dict()
+        tx_id = doc.id
+        u = get_user_by_id(t.get("userId"))
+        uname = u["fullName"] if u else ""
+        writer.writerow([
+            tx_id,
+            t.get("cityId"),
+            t.get("date"),
+            t.get("yearMonth"),
+            t.get("schoolYear"),
+            t.get("type"),
+            t.get("source"),
+            t.get("amount"),
+            t.get("paymentMethod"),
+            t.get("categoryName"),
+            t.get("description"),
+            uname,
+            t.get("isAdvance"),
+            t.get("advanceStatus"),
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
 
 # -------------------------------------------------------------------
 # Admin : Gestion catégories de dépenses
