@@ -394,6 +394,13 @@ BASE_LAYOUT = """
   <meta charset="utf-8">
   <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <head>
+  <meta charset="utf-8">
+  <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+
   <!-- Bootstrap 5 -->
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -402,6 +409,25 @@ BASE_LAYOUT = """
     crossorigin="anonymous"
   >
 </head>
+  <script
+    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+    crossorigin="anonymous"
+  ></script>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function() {
+        navigator.serviceWorker.register("{{ url_for('static', filename='service-worker.js') }}")
+          .catch(function(error) {
+            console.log("Service worker registration failed:", error);
+          });
+      });
+    }
+  </script>
+</body>
+</html>
+
 <body class="bg-light">
 
   <!-- Navbar -->
