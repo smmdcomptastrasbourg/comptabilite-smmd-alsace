@@ -394,12 +394,13 @@ BASE_LAYOUT = """
   <meta charset="utf-8">
   <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <head>
-  <meta charset="utf-8">
-  <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+
+  <!-- PWA manifest -->
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+  <meta name="theme-color" content="#0d6efd">
+
+  <!-- Icône (facultatif si tu n'as pas de vrai fichier) -->
+  <link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}">
 
   <!-- Bootstrap 5 -->
   <link
@@ -409,141 +410,119 @@ BASE_LAYOUT = """
     crossorigin="anonymous"
   >
 </head>
-  <script
-    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-    crossorigin="anonymous"
-  ></script>
-
-  <script>
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", function() {
-        navigator.serviceWorker.register("{{ url_for('static', filename='service-worker.js') }}")
-          .catch(function(error) {
-            console.log("Service worker registration failed:", error);
-          });
-      });
-    }
-  </script>
-</body>
-</html>
 
 <body class="bg-light">
 
-  <!-- Navbar -->
-  <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
-    <div class="container-fluid">
-      <a class="navbar-brand" href="{{ url_for('dashboard') }}">Compta SMMD</a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
-              data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent"
-              aria-expanded="false" aria-label="Basculer la navigation">
-        <span class="navbar-toggler-icon"></span>
-      </button>
+<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('dashboard') }}">Compta SMMD</a>
 
-      <div class="collapse navbar-collapse" id="navbarSupportedContent">
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          {% if session.user_id %}
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain">
+      <span class="navbar-toggler-icon"></span>
+    </button>
 
-            {# ---- CAS ADMIN : uniquement les menus d’admin ---- #}
-            {% if session.role == 'admin' %}
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('admin_transactions') }}">Admin compta</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('admin_categories') }}">Catégories dépenses</a>
-              </li>
-
-            {# ---- CAS NON-ADMIN : utilisateur / chef ---- #}
-            {% else %}
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('dashboard') }}">Tableau de bord</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('income') }}">Recettes</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('expense') }}">Dépenses</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('my_operations') }}">Mes opérations</a>
-              </li>
-
-              {% if session.role in ['chef'] %}
-                <li class="nav-item">
-                  <a class="nav-link" href="{{ url_for('chef_city_transactions') }}">Compta maison</a>
-                </li>
-                <li class="nav-item">
-                  <a class="nav-link" href="{{ url_for('chef_advances') }}">Avances (chef)</a>
-                </li>
-                <li class="nav-item">
-                  <a class="nav-link" href="{{ url_for('chef_export') }}">Export ville</a>
-                </li>
-              {% endif %}
-            {% endif %}
-
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('logout') }}">Déconnexion</a>
-            </li>
-
-          {% else %}
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('login') }}">Connexion</a>
-            </li>
-          {% endif %}
-        </ul>
+    <div class="collapse navbar-collapse" id="navbarMain">
+      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 
         {% if session.user_id %}
-          <span class="navbar-text text-white">
-            Bonjour {{ session.short_name }}
-          </span>
-        {% endif %}
-      </div>
-    </div>
-  </nav>
 
-  <div class="container mb-5">
+          {% if session.role == 'admin' %}
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('admin_transactions') }}">Admin compta</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('admin_categories') }}">Catégories dépenses</a>
+            </li>
 
-    <!-- Messages flash -->
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, msg in messages %}
-          {% if category == 'error' %}
-            {% set alert_class = 'danger' %}
-          {% elif category == 'success' %}
-            {% set alert_class = 'success' %}
           {% else %}
-            {% set alert_class = 'info' %}
-          {% endif %}
-          <div class="alert alert-{{ alert_class }} alert-dismissible fade show" role="alert">
-            {{ msg }}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fermer"></button>
-          </div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('dashboard') }}">Tableau de bord</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('income') }}">Recettes</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('expense') }}">Dépenses</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="{{ url_for('my_operations') }}">Mes opérations</a>
+            </li>
 
-    <!-- Carte principale -->
-    <div class="card shadow-sm">
-      <div class="card-body">
-        {{ body|safe }}
-      </div>
+            {% if session.role == 'chef' %}
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('chef_city_transactions') }}">Compta maison</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('chef_advances') }}">Avances</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('chef_export') }}">Export ville</a>
+              </li>
+            {% endif %}
+          {% endif %}
+
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('logout') }}">Déconnexion</a>
+          </li>
+
+        {% else %}
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('login') }}">Connexion</a>
+          </li>
+        {% endif %}
+      </ul>
+
+      {% if session.user_id %}
+        <span class="navbar-text text-white">
+          Bonjour {{ session.short_name }}
+        </span>
+      {% endif %}
     </div>
   </div>
+</nav>
 
-  <script
-    src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-    integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-    crossorigin="anonymous"
-  ></script>
+<div class="container my-4">
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, msg in messages %}
+        <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
+          {{ msg }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {{ body|safe }}
+
+</div>
+
+<script
+  src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+  integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+  crossorigin="anonymous"
+></script>
+
+<script>
+  // Enregistrement du service worker pour la PWA
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function() {
+      navigator.serviceWorker.register("/service-worker.js")
+        .catch(function(error) {
+          console.log("Service worker registration failed:", error);
+        });
+    });
+  }
+</script>
+
 </body>
 </html>
 """
 
-def render_page(body_html: str, title: str = None):
-    return render_template_string(BASE_LAYOUT, body=body_html, title=title)
 
 # -------------------------------------------------------------------
 # Routes: Authentification
