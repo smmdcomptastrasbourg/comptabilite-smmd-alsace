@@ -767,7 +767,7 @@ def income():
     year_month = today.strftime("%Y-%m")
     school_year = get_school_year(today)
 
-    # 1) Récupération allocation existante
+    # 1) Récupération allocation existante (doc de référence)
     alloc_q = (
         db.collection(ALLOCATIONS_COLLECTION)
         .where("userId", "==", user["id"])
@@ -779,7 +779,7 @@ def income():
     allocation_amount = 0.0
 
     if alloc_docs:
-        allocation_amount = alloc_docs[0].to_dict().get("amount", 0.0)
+        allocation_amount = float(alloc_docs[0].to_dict().get("amount", 0.0))
 
     # -------------------------------------------------------------------
     # POST : Mise à jour allocation ou ajout recette ponctuelle
@@ -797,8 +797,10 @@ def income():
                 flash("Montant d’allocation invalide.", "error")
                 return redirect(url_for("income"))
 
+            has_existing = bool(alloc_docs)
+
             # Mise à jour (création si première fois)
-            if alloc_docs:
+            if has_existing:
                 alloc_docs[0].reference.update(
                     {
                         "amount": new_amount,
@@ -815,6 +817,64 @@ def income():
                         "createdAt": datetime.utcnow().isoformat(),
                     }
                 )
+
+            # --- Synchroniser avec les transactions mensuelles ---
+            # Construction de la liste des mois de l'année scolaire
+            # ex. "2024-2025" -> (2024,9..12) + (2025,1..8)
+            start_year, end_year = map(int, school_year.split("-"))
+            months_schedule = (
+                [(start_year, m) for m in range(9, 13)]
+                + [(end_year, m) for m in range(1, 9)]
+            )
+
+            current_ym_int = today.year * 100 + today.month
+
+            for y, m in months_schedule:
+                ym_int = y * 100 + m
+                ym_str = f"{y:04d}-{m:02d}"
+                month_date = date(y, m, 1)
+
+                # Si c'est la première allocation -> on crée pour toute l'année scolaire
+                # Si c'est une modification -> on met à jour à partir du mois en cours
+                if (not has_existing) or (ym_int >= current_ym_int):
+                    tx_q = (
+                        db.collection(TRANSACTIONS_COLLECTION)
+                        .where("userId", "==", user["id"])
+                        .where("cityId", "==", user["cityId"])
+                        .where("ttype", "==", "income")
+                        .where("source", "==", "allocation_mensuelle")
+                        .where("yearMonth", "==", ym_str)
+                        .limit(1)
+                        .stream()
+                    )
+                    tx_docs = list(tx_q)
+
+                    if tx_docs:
+                        # Mettre à jour le montant (et la date au 1er du mois)
+                        tx_docs[0].reference.update(
+                            {
+                                "amount": new_amount,
+                                "date": month_date.isoformat(),
+                                "schoolYear": school_year,
+                                "updatedAt": datetime.utcnow().isoformat(),
+                            }
+                        )
+                    else:
+                        # Créer une transaction d'allocation pour ce mois
+                        create_transaction(
+                            city_id=user["cityId"],
+                            user_id=user["id"],
+                            d=month_date,
+                            ttype="income",
+                            source="allocation_mensuelle",
+                            amount=new_amount,
+                            payment_method=None,
+                            is_advance=False,
+                            advance_status=None,
+                            description="Allocation mensuelle",
+                            category_id=None,
+                            category_name=None,
+                        )
 
             flash("Allocation mensuelle mise à jour.", "success")
             return redirect(url_for("income"))
@@ -848,14 +908,15 @@ def income():
             return redirect(url_for("income"))
 
     # -------------------------------------------------------------------
-    # Récupération des recettes du mois
+    # Récupération des recettes du mois (pour l'affichage)
     # -------------------------------------------------------------------
     q = (
         db.collection(TRANSACTIONS_COLLECTION)
         .where("cityId", "==", user["cityId"])
+        .where("userId", "==", user["id"])
         .where("ttype", "==", "income")
         .where("yearMonth", "==", year_month)
-        .order_by("timestamp")
+        .order_by("date")
     )
     docs = q.stream()
 
@@ -866,7 +927,7 @@ def income():
     for d in docs:
         data = d.to_dict()
         amount = float(data.get("amount", 0.0))
-        is_allocation = data.get("source") == "allocation"
+        is_allocation = data.get("source") == "allocation_mensuelle"
         total_income += amount
         if is_allocation:
             total_alloc += amount
@@ -1010,6 +1071,7 @@ def income():
     """
 
     return render_page(body, "Recettes")
+
 
 
 
@@ -1838,7 +1900,10 @@ def admin_transactions():
     try:
         docs = list(q.stream())
     except Exception:
-        flash("Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.", "error")
+        flash(
+            "Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.",
+            "error",
+        )
         docs = []
 
     rows = ""
@@ -1862,6 +1927,7 @@ def admin_transactions():
         desc = t.get("description") or ""
         adv_status = t.get("advanceStatus") or ""
         cat_name = t.get("categoryName") or ""
+        date_str = t.get("date") or ""
 
         delete_url = url_for(
             "admin_delete_transaction",
@@ -1876,18 +1942,27 @@ def admin_transactions():
           <tr>
             <td>{tx_id}</td>
             <td>{city_label}</td>
-            <td>{t.get('date')}</td>
+            <td>{date_str}</td>
             <td>{ttype}</td>
             <td>{source}</td>
             <td>{cat_name}</td>
             <td>{pay}</td>
-            <td>{amount:.2f}</td>
+            <td class="text-end">{amount:.2f} €</td>
             <td>{uname}</td>
             <td>{adv_status}</td>
             <td>{desc}</td>
-            <td><a href="{delete_url}" onclick="return confirm('Supprimer définitivement cette opération ?');">Annuler</a></td>
+            <td class="text-end">
+              <a href="{delete_url}"
+                 class="btn btn-sm btn-outline-danger"
+                 onclick="return confirm('Supprimer définitivement cette opération ?');">
+                Annuler
+              </a>
+            </td>
           </tr>
         """
+
+    no_rows_html = "<tr><td colspan='12' class='text-center text-muted'>Aucune opération pour ce filtre.</td></tr>"
+    tbody_rows = rows or no_rows_html
 
     export_url = url_for(
         "admin_transactions_export",
@@ -1897,173 +1972,105 @@ def admin_transactions():
         month=month,
     )
 
+    ville_label = "toutes" if city == "all" else city
+
     body = f"""
-      <h1>Admin compta – toutes opérations</h1>
+    <h1 class="mb-4">Admin compta – toutes opérations</h1>
 
-      <form method="get" style="margin-bottom: 1rem;">
-        <label>Ville :</label>
-        <select name="city">
-          <option value="all" {"selected" if city == "all" else ""}>Toutes</option>
-          <option value="strasbourg" {"selected" if city == "strasbourg" else ""}>Strasbourg</option>
-          <option value="colmar" {"selected" if city == "colmar" else ""}>Colmar</option>
-        </select>
+    <div class="row g-4 mb-3">
+      <div class="col-lg-7">
+        <div class="card shadow-sm border-0">
+          <div class="card-body">
+            <h5 class="card-title mb-3">Filtres</h5>
+            <form method="get" class="row g-2 align-items-end">
+              <div class="col-12">
+                <label class="form-label mb-1">Ville</label>
+                <select name="city" class="form-select">
+                  <option value="all" {'selected' if city == 'all' else ''}>Toutes</option>
+                  <option value="strasbourg" {'selected' if city == 'strasbourg' else ''}>Strasbourg</option>
+                  <option value="colmar" {'selected' if city == 'colmar' else ''}>Colmar</option>
+                </select>
+              </div>
 
-        <label style="margin-left:1rem;">Mode :</label>
-        <label><input type="radio" name="mode" value="month" {"checked" if mode == "month" else ""}> Mois</label>
-        <label><input type="radio" name="mode" value="schoolyear" {"checked" if mode == "schoolyear" else ""}> Année scolaire</label>
+              <div class="col-12 mt-2">
+                <span class="form-label d-block mb-1">Mode</span>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="mode" value="month" {'checked' if mode == 'month' else ''}>
+                  <label class="form-check-label">Mois</label>
+                </div>
+                <div class="form-check form-check-inline">
+                  <input class="form-check-input" type="radio" name="mode" value="schoolyear" {'checked' if mode == 'schoolyear' else ''}>
+                  <label class="form-check-label">Année scolaire</label>
+                </div>
+              </div>
 
-        <label style="margin-left:1rem;">Année :</label>
-        <input type="number" name="year" value="{year}" min="2000" max="2100" required>
+              <div class="col-4">
+                <label class="form-label mb-1">Année</label>
+                <input type="number" name="year" value="{year}" min="2000" max="2100" class="form-control" required>
+              </div>
+              <div class="col-4">
+                <label class="form-label mb-1">Mois</label>
+                <input type="number" name="month" value="{month}" min="1" max="12" class="form-control">
+              </div>
+              <div class="col-4 d-grid">
+                <button type="submit" class="btn btn-primary">Afficher</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
 
-        <label>Mois :</label>
-        <input type="number" name="month" value="{month}" min="1" max="12">
+      <div class="col-lg-5">
+        <div class="card shadow-sm border-0">
+          <div class="card-body">
+            <h5 class="card-title mb-2">Résumé</h5>
+            <p class="mb-1"><strong>Filtre :</strong> {subtitle}</p>
+            <p class="mb-1"><strong>Ville :</strong> {ville_label}</p>
+            <p class="mb-1"><strong>Nombre d'opérations :</strong> {count}</p>
+            <p class="mb-0"><strong>Total :</strong> {total:.2f} €</p>
+          </div>
+        </div>
+      </div>
+    </div>
 
-        <button type="submit">Afficher</button>
-      </form>
+    <div class="mb-3">
+      <a href="{export_url}" class="btn btn-outline-secondary btn-sm">
+        📥 Exporter en CSV (mêmes filtres)
+      </a>
+    </div>
 
-      <p><strong>Filtre :</strong> {subtitle} – Ville : {"toutes" if city == "all" else city}</p>
-      <p><strong>Nombre d'opérations :</strong> {count} – <strong>Total :</strong> {total:.2f} €</p>
-
-      <p>
-        <a href="{export_url}">📥 Exporter en CSV (mêmes filtres)</a>
-      </p>
-
-      <table>
-        <tr>
-          <th>ID</th>
-          <th>Ville</th>
-          <th>Date</th>
-          <th>Type</th>
-          <th>Source</th>
-          <th>Catégorie</th>
-          <th>Moyen</th>
-          <th>Montant (€)</th>
-          <th>Utilisateur</th>
-          <th>Statut avance</th>
-          <th>Description</th>
-          <th>Action</th>
-        </tr>
-        {rows if rows else "<tr><td colspan='12'>Aucune opération pour ce filtre.</td></tr>"}
-      </table>
+    <div class="card shadow-sm border-0">
+      <div class="card-header bg-light">
+        <h5 class="mb-0">Opérations – {subtitle}</h5>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm mb-0 align-middle">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Ville</th>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Catégorie</th>
+                <th>Moyen</th>
+                <th class="text-end">Montant (€)</th>
+                <th>Utilisateur</th>
+                <th>Statut avance</th>
+                <th>Description</th>
+                <th class="text-end">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tbody_rows}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
     """
     return render_page(body, "Admin compta")
-
-
-@app.route("/admin/transactions/export")
-def admin_transactions_export():
-    require_login()
-    require_admin()
-    today = date.today()
-
-    city = request.args.get("city", "all")
-    mode = request.args.get("mode", "month")
-    year_str = request.args.get("year")
-    month_str = request.args.get("month")
-
-    if year_str:
-        try:
-            year = int(year_str)
-        except ValueError:
-            year = today.year
-    else:
-        year = today.year
-
-    if month_str:
-        try:
-            month = int(month_str)
-        except ValueError:
-            month = today.month
-    else:
-        month = today.month
-
-    selected_date = date(year, max(1, min(12, month)), 1)
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    q = db.collection(TRANSACTIONS_COLLECTION)
-
-    if city != "all":
-        q = q.where("cityId", "==", city)
-
-    if mode == "schoolyear":
-        q = q.where("schoolYear", "==", school_year)
-        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{school_year}.csv"
-    else:
-        q = q.where("yearMonth", "==", year_month)
-        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{year_month}.csv"
-
-    q = q.order_by("date")
-
-    try:
-        docs = list(q.stream())
-    except Exception:
-        flash("Firestore demande peut-être un index pour l'export (admin_transactions_export).", "error")
-        return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
-
-    output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(
-        ["id", "cityId", "date", "yearMonth", "schoolYear",
-         "type", "source", "amount", "paymentMethod",
-         "categoryName", "description", "userFullName",
-         "isAdvance", "advanceStatus"]
-    )
-
-    for doc in docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        u = get_user_by_id(t.get("userId"))
-        uname = u["fullName"] if u else ""
-        writer.writerow([
-            tx_id,
-            t.get("cityId"),
-            t.get("date"),
-            t.get("yearMonth"),
-            t.get("schoolYear"),
-            t.get("type"),
-            t.get("source"),
-            t.get("amount"),
-            t.get("paymentMethod"),
-            t.get("categoryName"),
-            t.get("description"),
-            uname,
-            t.get("isAdvance"),
-            t.get("advanceStatus"),
-        ])
-
-    csv_content = output.getvalue()
-    output.close()
-
-    return Response(
-        csv_content,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-@app.route("/admin/transactions/delete/<tx_id>")
-def admin_delete_transaction(tx_id):
-    require_login()
-    require_admin()
-
-    city = request.args.get("city", "all")
-    mode = request.args.get("mode", "month")
-    year = request.args.get("year")
-    month = request.args.get("month")
-
-    ref = db.collection(TRANSACTIONS_COLLECTION).document(tx_id)
-    doc = ref.get()
-    if not doc.exists:
-        flash("Opération introuvable.", "error")
-    else:
-        data = doc.to_dict()
-        amount = float(data.get("amount", 0.0))
-        source = data.get("source") or ""
-        desc = data.get("description") or ""
-        ref.delete()
-        flash(f"Opération supprimée (source={source}, montant={amount:.2f} €, description='{desc}').", "success")
-
-    return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
 
 # -------------------------------------------------------------------
 # Admin : Gestion catégories de dépenses
