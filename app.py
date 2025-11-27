@@ -399,9 +399,6 @@ BASE_LAYOUT = """
   <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
   <meta name="theme-color" content="#0d6efd">
 
-  <!-- Icône (facultatif si tu n'as pas de vrai fichier) -->
-  <link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}">
-
   <!-- Bootstrap 5 -->
   <link
     href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
@@ -410,6 +407,7 @@ BASE_LAYOUT = """
     crossorigin="anonymous"
   >
 </head>
+
 
 <body class="bg-light">
 
