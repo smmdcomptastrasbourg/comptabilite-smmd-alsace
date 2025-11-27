@@ -406,6 +406,14 @@ BASE_LAYOUT = """
     integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
     crossorigin="anonymous"
   >
+    <style>
+    body {
+      background: #f4f6fb;
+    }
+    .navbar-brand {
+      font-weight: 600;
+    }
+  </style>
 </head>
 
 <body class="bg-light">
@@ -549,20 +557,36 @@ def login():
                     return redirect(url_for("change_password_first"))
                 return redirect(url_for("dashboard"))
 
-    body = """
-      <h1>Connexion</h1>
-      <form method="post">
-        <div>
-          <label>Identifiant :</label><br>
-          <input type="text" name="login" required>
+        body = """
+    <div class="row justify-content-center">
+      <div class="col-md-6 col-lg-4">
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-primary text-white text-center">
+            <h5 class="mb-0">Connexion</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <div class="mb-3">
+                <label class="form-label">Identifiant</label>
+                <input class="form-control" name="username" required autocomplete="username">
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Mot de passe</label>
+                <input class="form-control" name="password" type="password" required autocomplete="current-password">
+              </div>
+              <div class="d-grid">
+                <button class="btn btn-primary">Se connecter</button>
+              </div>
+            </form>
+          </div>
+          <div class="card-footer text-muted small text-center">
+            Comptabilité SMMD Alsace
+          </div>
         </div>
-        <div>
-          <label>Mot de passe :</label><br>
-          <input type="password" name="password" required>
-        </div>
-        <button type="submit">Se connecter</button>
-      </form>
+      </div>
+    </div>
     """
+
     return render_page(body, "Connexion")
 
 @app.route("/logout")
@@ -633,18 +657,32 @@ def dashboard():
     city_balance = get_city_annual_balance(user["cityId"], school_year)
     personal_balance = get_personal_monthly_balance(user["id"], year_month)
 
-    body = f"""
-      <h1>Comptabilité SMMD Alsace</h1>
-      <h2>Tableau de bord</h2>
-      <p>Utilisateur : {user['fullName']} ({user['role']})</p>
-      <p>Ville : {user['cityId'].capitalize()}</p>
-      <p>Année scolaire : {school_year}</p>
+        body = f"""
+    <h1 class="mb-4">Tableau de bord</h1>
 
-      <h3>Solde annuel du compte de la ville</h3>
-      <p><strong>{city_balance:.2f} €</strong></p>
+    <div class="row g-4">
+      <div class="col-md-6">
+        <div class="card border-0 shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title">Solde de la ville</h5>
+            <p class="text-muted mb-1">Ville : <strong>{city}</strong></p>
+            <p class="display-6 mb-0">{total:.2f} €</p>
+          </div>
+        </div>
+      </div>
 
-      <h3>Mon solde mensuel personnel ({year_month})</h3>
-      <p><strong>{personal_balance:.2f} €</strong></p>
+      <div class="col-md-6">
+        <div class="card border-0 shadow-sm">
+          <div class="card-body">
+            <h5 class="card-title">Votre solde du mois</h5>
+            <p class="text-muted mb-1">Mois : <strong>{year_month}</strong></p>
+            <p class="display-6 mb-3">{perso:.2f} €</p>
+            <a href="{url_for('income')}" class="btn btn-outline-success btn-sm me-2">Recettes</a>
+            <a href="{url_for('expense')}" class="btn btn-outline-danger btn-sm">Dépenses</a>
+          </div>
+        </div>
+      </div>
+    </div>
     """
     return render_page(body, "Tableau de bord")
 
