@@ -15,25 +15,24 @@ from flask import (
     abort,
     flash,
     Response,
-    current_app, # Ajout pour l'accès aux configs
+    current_app,
 )
 from google.cloud import firestore
 from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 
 # -------------------------------------------------------------------
-# Configuration et initialisation (en tête)
+# Configuration et initialisation
 # -------------------------------------------------------------------
 
 # 1. Chargement des variables d'environnement
 load_dotenv()
 
 # 2. Variables de sécurité
-# Utiliser des valeurs par défaut pour le développement, mais forte recommandation de les définir
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "odile+++")
 MASTER_PASSWORD = os.getenv("MASTER_PASSWORD", "odile+++")
 
-# 3. Initialisation de l'application Flask (une seule fois)
+# 3. Initialisation de l'application Flask
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 
@@ -43,7 +42,7 @@ CITIES_COLLECTION = "cities"
 ALLOC_CONFIGS_COLLECTION = "allocationConfigs"
 TRANSACTIONS_COLLECTION = "transactions"
 EXPENSE_CATEGORIES_COLLECTION = "expenseCategories"
-ALLOCATIONS_COLLECTION = "allocations" # Reste pour l'instant, mais peut être fusionné avec ALLOC_CONFIGS
+ALLOCATIONS_COLLECTION = "allocations"
 
 # 5. Initialisation Firestore avec credentials explicites
 creds_json_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
@@ -231,7 +230,7 @@ def get_active_expense_categories():
 def get_allocation_config(user_id: str, school_year: str):
     db = get_db()
     docs = (
-        db.collection(ALLOC_CONFIGS_COLLECTION) # Utilisation uniforme de ALLOC_CONFIGS_COLLECTION
+        db.collection(ALLOC_CONFIGS_COLLECTION)
         .where("userId", "==", user_id)
         .where("schoolYear", "==", school_year)
         .where("active", "==", True)
@@ -384,7 +383,7 @@ def ensure_allocation_transaction_for_month(user, d: date):
     )
 
 # -------------------------------------------------------------------
-# Auth helpers & Decorateurs (Transformé en décorateurs)
+# Auth helpers & Decorateurs
 # -------------------------------------------------------------------
 
 def login_user(user_data: dict):
@@ -697,7 +696,7 @@ def logout():
     return redirect(url_for("login"))
 
 @app.route("/change-password", methods=["GET", "POST"])
-@require_login # La fonction 'require_login' prend désormais en charge la vérification mustChangePassword
+@require_login
 def change_password_first():
     user = current_user()
     
@@ -1083,9 +1082,11 @@ def income():
                     </div>
                 </div>
             </form>
-            {% if user["role"] not in ("chef", "admin") %}
+            
+            {% if session.role not in ("chef", "admin") %}
             <p class="small text-muted mt-2">Seul un chef de maison ou un administrateur peut modifier ce montant.</p>
             {% endif %}
+            
         </div>
     </div>
 
@@ -1139,10 +1140,6 @@ def income():
 
     return render_page(body, "Recettes")
 
-# ... (Les routes pour expense, my_operations, chef_city_transactions, etc.
-# doivent être ajoutées ici, en utilisant les décorateurs @require_login, 
-# @require_chef_or_admin ou @require_admin pour la protection)
-
 # -------------------------------------------------------------------
 # Route d'Admin (Exemple)
 # -------------------------------------------------------------------
@@ -1179,6 +1176,10 @@ def admin_categories():
     """
     return render_page(body, "Admin Catégories")
 
+
+# -------------------------------------------------------------------
+# Lancement de l'application
+# -------------------------------------------------------------------
 
 if __name__ == "__main__":
     # Initialisation des données de base au démarrage si nécessaire
