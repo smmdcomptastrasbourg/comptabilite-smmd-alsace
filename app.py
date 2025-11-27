@@ -55,7 +55,7 @@ else:
         "Aucun identifiant Firestore trouvé. "
         "Définis soit GOOGLE_APPLICATION_CREDENTIALS vers le fichier JSON (local), "
         "soit GOOGLE_APPLICATION_CREDENTIALS_JSON avec le contenu JSON (Render)."
-    )
+)
 
 USERS_COLLECTION = "users"
 CITIES_COLLECTION = "cities"
