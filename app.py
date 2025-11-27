@@ -67,6 +67,8 @@ ALLOC_CONFIGS_COLLECTION = "allocationConfigs"
 TRANSACTIONS_COLLECTION = "transactions"
 EXPENSE_CATEGORIES_COLLECTION = "expenseCategories"
 ALLOCATIONS_COLLECTION = "allocations"
+CITIES_COLLECTION = "cities"
+
 
 # -------------------------------------------------------------------
 # Utilitaires généraux
@@ -2426,162 +2428,301 @@ def admin_category_disable(cat_id):
     return redirect(url_for("admin_categories"))
 
 # -------------------------------------------------------------------
-# Admin : Gestion utilisateurs
+# Admin : gestion des utilisateurs + villes
 # -------------------------------------------------------------------
 
-@app.route("/admin/users")
+@app.route("/admin/users", methods=["GET", "POST"])
 def admin_users():
     require_login()
     require_admin()
 
-    docs = db.collection(USERS_COLLECTION).order_by("cityId").order_by("fullName").stream()
+    # ------------------------------------------------------
+    # POST : actions (ajout ville / ajout user / reset MDP)
+    # ------------------------------------------------------
+    if request.method == "POST":
+        action = request.form.get("action")
 
-    rows = ""
+        # --- Ajouter une nouvelle ville ---
+        if action == "add_city":
+            city_label = (request.form.get("city_label") or "").strip()
+            if not city_label:
+                flash("Nom de ville invalide.", "error")
+                return redirect(url_for("admin_users"))
+
+            # on fabrique un identifiant technique simple à partir du nom
+            slug = (
+                city_label.strip()
+                .lower()
+                .replace(" ", "-")
+                .replace("é", "e")
+                .replace("è", "e")
+                .replace("ê", "e")
+                .replace("à", "a")
+                .replace("â", "a")
+            )
+
+            city_ref = db.collection(CITIES_COLLECTION).document(slug)
+            if city_ref.get().exists:
+                flash("Cette ville existe déjà.", "error")
+            else:
+                city_ref.set(
+                    {
+                        "id": slug,
+                        "label": city_label,
+                        "createdAt": utc_now_iso(),
+                    }
+                )
+                flash(f"Ville « {city_label} » ajoutée avec succès.", "success")
+
+            return redirect(url_for("admin_users"))
+
+        # --- Ajouter un utilisateur ---
+        if action == "add_user":
+            full_name = (request.form.get("full_name") or "").strip()
+            login = (request.form.get("login") or "").strip()
+            city_id = (request.form.get("city_id") or "").strip()
+            role = (request.form.get("role") or "user").strip()
+            password = request.form.get("password") or ""
+
+            if not full_name or not login or not city_id or not password:
+                flash("Tous les champs sont obligatoires pour créer un utilisateur.", "error")
+                return redirect(url_for("admin_users"))
+
+            is_admin = role == "admin"
+            is_chef = role == "chef"
+
+            password_hash = generate_password_hash(password)
+
+            db.collection(USERS_COLLECTION).add(
+                {
+                    "fullName": full_name,
+                    "login": login,
+                    "cityId": city_id,
+                    "isAdmin": is_admin,
+                    "isChef": is_chef,
+                    "passwordHash": password_hash,
+                    "createdAt": utc_now_iso(),
+                }
+            )
+
+            flash(f"Utilisateur « {full_name} » créé avec succès.", "success")
+            return redirect(url_for("admin_users"))
+
+        # --- Mettre à jour le mot de passe d'un utilisateur ---
+        if action == "reset_password":
+            user_id = request.form.get("user_id")
+            new_password = request.form.get("new_password") or ""
+
+            if not user_id or not new_password:
+                flash("Utilisateur ou mot de passe manquant pour la réinitialisation.", "error")
+                return redirect(url_for("admin_users"))
+
+            user_ref = db.collection(USERS_COLLECTION).document(user_id)
+            if not user_ref.get().exists:
+                flash("Utilisateur introuvable.", "error")
+                return redirect(url_for("admin_users"))
+
+            user_ref.update(
+                {
+                    "passwordHash": generate_password_hash(new_password),
+                    "updatedAt": utc_now_iso(),
+                }
+            )
+            flash("Mot de passe mis à jour.", "success")
+            return redirect(url_for("admin_users"))
+
+    # ------------------------------------------------------
+    # GET : affichage de la liste + formulaires
+    # ------------------------------------------------------
+
+    # Récupération des villes
+    cities = []
+    try:
+        city_docs = db.collection(CITIES_COLLECTION).stream()
+        for c in city_docs:
+            data = c.to_dict()
+            cities.append(
+                {
+                    "id": data.get("id") or c.id,
+                    "label": data.get("label") or (data.get("id") or c.id),
+                }
+            )
+    except Exception:
+        # On n'empêche pas la page de se charger si Firestore râle
+        cities = []
+
+    # Si aucune ville configurée, on propose au moins Strasbourg / Colmar
+    if not cities:
+        cities = [
+            {"id": "strasbourg", "label": "Strasbourg"},
+            {"id": "colmar", "label": "Colmar"},
+        ]
+
+    # Récupération des utilisateurs
+    users = []
+    docs = db.collection(USERS_COLLECTION).order_by("cityId").order_by("fullName").stream()
     for doc in docs:
-        u = doc.to_dict()
-        uid = doc.id
-        rows += f"""
+        data = doc.to_dict()
+        is_admin = bool(data.get("isAdmin"))
+        is_chef = bool(data.get("isChef"))
+
+        if is_admin:
+            role_label = "Admin"
+        elif is_chef:
+            role_label = "Chef de maison"
+        else:
+            role_label = "Utilisateur"
+
+        users.append(
+            {
+                "id": doc.id,
+                "fullName": data.get("fullName", ""),
+                "login": data.get("login", ""),
+                "cityId": data.get("cityId", ""),
+                "isAdmin": is_admin,
+                "isChef": is_chef,
+                "roleLabel": role_label,
+            }
+        )
+
+    # HTML : options de villes pour les <select>
+    city_options_html = ""
+    for c in cities:
+        city_options_html += f'<option value="{c["id"]}">{c["label"]}</option>'
+
+    # HTML : lignes du tableau utilisateurs
+    user_rows_html = ""
+    for u in users:
+        user_rows_html += f"""
           <tr>
-            <td>{uid}</td>
-            <td>{u.get('login')}</td>
-            <td>{u.get('fullName')}</td>
-            <td>{u.get('cityId')}</td>
-            <td>{u.get('role')}</td>
-            <td>{"Oui" if u.get('active') else "Non"}</td>
-            <td>{u.get('passwordSetAt') or "Non défini"}</td>
-            <td>{u.get('lastLoginAt') or "-"}</td>
-            <td>{"Oui" if u.get('mustChangePassword') else "Non"}</td>
+            <td>{u["fullName"]}</td>
+            <td>{u["login"]}</td>
+            <td>{u["cityId"]}</td>
+            <td>{u["roleLabel"]}</td>
             <td>
-              <a href="{url_for('admin_reset_password', user_id=uid)}">Réinitialiser mot de passe</a>
+              <form method="post" class="d-flex gap-2">
+                <input type="hidden" name="action" value="reset_password">
+                <input type="hidden" name="user_id" value="{u["id"]}">
+                <input type="password" name="new_password" class="form-control form-control-sm" placeholder="Nouveau mot de passe" required>
+                <button type="submit" class="btn btn-sm btn-outline-primary">Mettre à jour</button>
+              </form>
             </td>
           </tr>
         """
 
     body = f"""
-      <h1>Administration – Utilisateurs</h1>
-      <p><a href="{url_for('admin_create_user')}">Créer un utilisateur</a></p>
-      <table>
-        <tr>
-          <th>ID</th>
-          <th>Login</th>
-          <th>Nom</th>
-          <th>Ville</th>
-          <th>Rôle</th>
-          <th>Actif</th>
-          <th>Mot de passe défini</th>
-          <th>Dernière connexion</th>
-          <th>Doit changer MDP</th>
-          <th>Actions</th>
-        </tr>
-        {rows}
-      </table>
+    <h1 class="mb-4">Admin utilisateurs</h1>
+
+    <div class="row g-4">
+      <!-- Tableau des utilisateurs -->
+      <div class="col-lg-8">
+        <div class="card shadow-sm border-0 mb-4">
+          <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">Liste des utilisateurs</h5>
+          </div>
+          <div class="card-body">
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th>Nom complet</th>
+                    <th>Identifiant</th>
+                    <th>Ville</th>
+                    <th>Rôle</th>
+                    <th>Mot de passe</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {user_rows_html if user_rows_html else '<tr><td colspan="5" class="text-muted text-center">Aucun utilisateur.</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ajout utilisateur + Ajout ville -->
+      <div class="col-lg-4">
+
+        <!-- Ajout utilisateur -->
+        <div class="card shadow-sm border-0 mb-4">
+          <div class="card-header bg-success text-white">
+            <h5 class="mb-0">Ajouter un utilisateur</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="action" value="add_user">
+
+              <div class="mb-3">
+                <label class="form-label">Nom complet</label>
+                <input type="text" name="full_name" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Identifiant (login)</label>
+                <input type="text" name="login" class="form-control" required>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Ville</label>
+                <select name="city_id" class="form-select" required>
+                  <option value="">-- choisir une ville --</option>
+                  {city_options_html}
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Rôle</label>
+                <select name="role" class="form-select" required>
+                  <option value="user">Utilisateur</option>
+                  <option value="chef">Chef de maison</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+
+              <div class="mb-3">
+                <label class="form-label">Mot de passe initial</label>
+                <input type="password" name="password" class="form-control" required>
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-success">Créer l'utilisateur</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <!-- Ajout ville -->
+        <div class="card shadow-sm border-0">
+          <div class="card-header bg-secondary text-white">
+            <h5 class="mb-0">Ajouter une ville</h5>
+          </div>
+          <div class="card-body">
+            <form method="post">
+              <input type="hidden" name="action" value="add_city">
+
+              <div class="mb-3">
+                <label class="form-label">Nom de la ville</label>
+                <input type="text" name="city_label" class="form-control" placeholder="Ex : Mulhouse" required>
+              </div>
+
+              <div class="d-grid">
+                <button type="submit" class="btn btn-secondary">Enregistrer la ville</button>
+              </div>
+            </form>
+
+            <p class="mt-2 text-muted small">
+              Le nom sera utilisé pour les nouveaux utilisateurs.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
     """
+
     return render_page(body, "Admin utilisateurs")
 
-@app.route("/admin/users/create", methods=["GET", "POST"])
-def admin_create_user():
-    require_login()
-    require_admin()
-
-    if request.method == "POST":
-        user_id = request.form.get("user_id").strip()
-        full_name = request.form.get("full_name").strip()
-        short_name = request.form.get("short_name").strip()
-        login_name = request.form.get("login").strip()
-        city_id = request.form.get("city_id")
-        role = request.form.get("role")
-        temp_pwd = request.form.get("temp_password").strip()
-
-        if not user_id or not full_name or not login_name:
-            flash("ID, Nom complet et Login obligatoires.", "error")
-        else:
-            existing = get_user_by_id(user_id)
-            if existing:
-                flash("ID déjà utilisé.", "error")
-            else:
-                create_user(
-                    user_id=user_id,
-                    full_name=full_name,
-                    short_name=short_name or full_name,
-                    login=login_name,
-                    city_id=city_id,
-                    role=role,
-                    temp_password=temp_pwd or None,
-                    must_change_password=True,
-                )
-                flash(f"Utilisateur {full_name} créé.", "success")
-                return redirect(url_for("admin_users"))
-
-    body = """
-      <h1>Créer utilisateur</h1>
-      <form method="post">
-        <label>ID interne :</label><br>
-        <input type="text" name="user_id" required><br>
-
-        <label>Nom complet :</label><br>
-        <input type="text" name="full_name" required><br>
-
-        <label>Nom court :</label><br>
-        <input type="text" name="short_name"><br>
-
-        <label>Login :</label><br>
-        <input type="text" name="login" required><br>
-
-        <label>Ville :</label><br>
-        <select name="city_id">
-          <option value="strasbourg">Strasbourg</option>
-          <option value="colmar">Colmar</option>
-        </select><br>
-
-        <label>Rôle :</label><br>
-        <select name="role">
-          <option value="user">Utilisateur</option>
-          <option value="chef">Chef de maison</option>
-          <option value="admin">Administrateur</option>
-        </select><br>
-
-        <label>Mot de passe temporaire :</label><br>
-        <input type="text" name="temp_password"><br>
-
-        <button type="submit">Créer</button>
-      </form>
-    """
-    return render_page(body, "Créer utilisateur")
-
-@app.route("/admin/users/<user_id>/reset-password", methods=["GET", "POST"])
-def admin_reset_password(user_id):
-    require_login()
-    require_admin()
-
-    u = get_user_by_id(user_id)
-    if not u:
-        abort(404)
-
-    if request.method == "POST":
-        temp_pwd = request.form.get("temp_password", "").strip()
-        if not temp_pwd:
-            flash("Veuillez saisir un mot de passe temporaire.", "error")
-        else:
-            new_hash = generate_password_hash(temp_pwd)
-            update_user(
-                user_id,
-                passwordHash=new_hash,
-                mustChangePassword=True,
-                passwordSetAt=None,
-            )
-            flash("Mot de passe réinitialisé.", "success")
-            return redirect(url_for("admin_users"))
-
-    body = f"""
-      <h1>Réinitialiser mot de passe</h1>
-      <p>Utilisateur : {u['fullName']}</p>
-      <form method="post">
-        <label>Nouveau mot de passe temporaire :</label><br>
-        <input type="text" name="temp_password" required><br>
-        <button type="submit">Réinitialiser</button>
-      </form>
-    """
-    return render_page(body, "Réinitialiser mot de passe")
 
 # -------------------------------------------------------------------
 # Initialisation complète (villes + 7 utilisateurs)
