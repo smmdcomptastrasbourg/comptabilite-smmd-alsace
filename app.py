@@ -787,7 +787,7 @@ def income():
     if request.method == "POST":
         action = request.form.get("action")
 
-        # --- Mise à jour allocation ---
+        # --- Mise à jour allocation mensuelle ---
         if action == "set_allocation":
             try:
                 new_amount = float(
@@ -799,7 +799,7 @@ def income():
 
             has_existing = bool(alloc_docs)
 
-            # Mise à jour (création si première fois)
+            # 1) Mettre à jour / créer le document d'allocation de référence
             if has_existing:
                 alloc_docs[0].reference.update(
                     {
@@ -818,9 +818,10 @@ def income():
                     }
                 )
 
-            # --- Synchroniser avec les transactions mensuelles ---
-            # Construction de la liste des mois de l'année scolaire
-            # ex. "2024-2025" -> (2024,9..12) + (2025,1..8)
+            # 2) Rejouer les allocations sur l'année scolaire
+            #    - Si c’est la première fois : tous les mois de l’année scolaire = nouveau montant
+            #    - Si c’est une modification : seulement à partir du mois courant, on met à jour/crée
+
             start_year, end_year = map(int, school_year.split("-"))
             months_schedule = (
                 [(start_year, m) for m in range(9, 13)]
@@ -834,8 +835,8 @@ def income():
                 ym_str = f"{y:04d}-{m:02d}"
                 month_date = date(y, m, 1)
 
-                # Si c'est la première allocation -> on crée pour toute l'année scolaire
-                # Si c'est une modification -> on met à jour à partir du mois en cours
+                # Première définition : on applique à tous les mois.
+                # Modification : seulement aux mois >= mois courant.
                 if (not has_existing) or (ym_int >= current_ym_int):
                     tx_q = (
                         db.collection(TRANSACTIONS_COLLECTION)
@@ -844,13 +845,14 @@ def income():
                         .where("ttype", "==", "income")
                         .where("source", "==", "allocation_mensuelle")
                         .where("yearMonth", "==", ym_str)
+                        .where("schoolYear", "==", school_year)
                         .limit(1)
                         .stream()
                     )
                     tx_docs = list(tx_q)
 
                     if tx_docs:
-                        # Mettre à jour le montant (et la date au 1er du mois)
+                        # On met à jour le montant à partir du mois courant
                         tx_docs[0].reference.update(
                             {
                                 "amount": new_amount,
@@ -860,7 +862,7 @@ def income():
                             }
                         )
                     else:
-                        # Créer une transaction d'allocation pour ce mois
+                        # Aucune allocation pour ce mois → on la crée
                         create_transaction(
                             city_id=user["cityId"],
                             user_id=user["id"],
@@ -876,7 +878,10 @@ def income():
                             category_name=None,
                         )
 
-            flash("Allocation mensuelle mise à jour.", "success")
+            flash(
+                "Allocation mensuelle mise à jour à partir de ce mois pour toute l’année scolaire.",
+                "success",
+            )
             return redirect(url_for("income"))
 
         # --- Recette ponctuelle ---
@@ -994,11 +999,11 @@ def income():
                   required
                 >
                 <div class="form-text">
-                  La modification s’applique au mois en cours et à tous les mois suivants de l’année scolaire.
+                  La modification s’applique à partir de ce mois jusqu’à la fin de l’année scolaire.
                 </div>
               </div>
 
-              <div class="d-grid">
+            <div class="d-grid">
                 <button class="btn btn-success">Mettre à jour</button>
               </div>
             </form>
