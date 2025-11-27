@@ -2449,7 +2449,7 @@ def admin_users():
                 flash("Nom de ville invalide.", "error")
                 return redirect(url_for("admin_users"))
 
-            # on fabrique un identifiant technique simple à partir du nom
+            # identifiant technique simple (slug)
             slug = (
                 city_label.strip()
                 .lower()
@@ -2548,10 +2548,10 @@ def admin_users():
                 }
             )
     except Exception:
-        # On n'empêche pas la page de se charger si Firestore râle
+        # Si problème Firestore, on laisse vide
         cities = []
 
-    # Si aucune ville configurée, on propose au moins Strasbourg / Colmar
+    # Si aucune ville configurée, on propose Strasbourg / Colmar par défaut
     if not cities:
         cities = [
             {"id": "strasbourg", "label": "Strasbourg"},
@@ -2560,7 +2560,8 @@ def admin_users():
 
     # Récupération des utilisateurs
     users = []
-    docs = db.collection(USERS_COLLECTION).order_by("cityId").order_by("fullName").stream()
+    # IMPORTANT : on ne met qu'un seul order_by pour éviter d'exiger un index composite
+    docs = db.collection(USERS_COLLECTION).order_by("fullName").stream()
     for doc in docs:
         data = doc.to_dict()
         is_admin = bool(data.get("isAdmin"))
@@ -2579,13 +2580,11 @@ def admin_users():
                 "fullName": data.get("fullName", ""),
                 "login": data.get("login", ""),
                 "cityId": data.get("cityId", ""),
-                "isAdmin": is_admin,
-                "isChef": is_chef,
                 "roleLabel": role_label,
             }
         )
 
-    # HTML : options de villes pour les <select>
+    # HTML : options de villes
     city_options_html = ""
     for c in cities:
         city_options_html += f'<option value="{c["id"]}">{c["label"]}</option>'
@@ -2722,6 +2721,7 @@ def admin_users():
     """
 
     return render_page(body, "Admin utilisateurs")
+
 
 
 # -------------------------------------------------------------------
