@@ -768,18 +768,18 @@ def income():
     school_year = get_school_year(today)
 
     # 1) Récupération allocation existante
-    alloc_doc = (
+    alloc_q = (
         db.collection(ALLOCATIONS_COLLECTION)
         .where("userId", "==", user["id"])
         .where("schoolYear", "==", school_year)
         .limit(1)
         .stream()
     )
-    alloc_doc = list(alloc_doc)
+    alloc_docs = list(alloc_q)
     allocation_amount = 0.0
 
-    if alloc_doc:
-        allocation_amount = alloc_doc[0].to_dict().get("amount", 0.0)
+    if alloc_docs:
+        allocation_amount = alloc_docs[0].to_dict().get("amount", 0.0)
 
     # -------------------------------------------------------------------
     # POST : Mise à jour allocation ou ajout recette ponctuelle
@@ -790,25 +790,31 @@ def income():
         # --- Mise à jour allocation ---
         if action == "set_allocation":
             try:
-                new_amount = float(request.form.get("allocation_amount").replace(",", "."))
+                new_amount = float(
+                    request.form.get("allocation_amount").replace(",", ".")
+                )
             except Exception:
                 flash("Montant d’allocation invalide.", "error")
                 return redirect(url_for("income"))
 
             # Mise à jour (création si première fois)
-            if alloc_doc:
-                alloc_doc[0].reference.update({
-                    "amount": new_amount,
-                    "updatedAt": datetime.utcnow().isoformat()
-                })
+            if alloc_docs:
+                alloc_docs[0].reference.update(
+                    {
+                        "amount": new_amount,
+                        "updatedAt": datetime.utcnow().isoformat(),
+                    }
+                )
             else:
-                db.collection(ALLOCATIONS_COLLECTION).add({
-                    "userId": user["id"],
-                    "cityId": user["cityId"],
-                    "amount": new_amount,
-                    "schoolYear": school_year,
-                    "createdAt": datetime.utcnow().isoformat(),
-                })
+                db.collection(ALLOCATIONS_COLLECTION).add(
+                    {
+                        "userId": user["id"],
+                        "cityId": user["cityId"],
+                        "amount": new_amount,
+                        "schoolYear": school_year,
+                        "createdAt": datetime.utcnow().isoformat(),
+                    }
+                )
 
             flash("Allocation mensuelle mise à jour.", "success")
             return redirect(url_for("income"))
@@ -854,14 +860,27 @@ def income():
     docs = q.stream()
 
     month_incomes = []
+    total_income = 0.0
+    total_alloc = 0.0
+
     for d in docs:
         data = d.to_dict()
-        month_incomes.append({
-            "date": data.get("date", ""),
-            "amount": data.get("amount", 0),
-            "isAllocation": data.get("source") == "allocation",
-            "description": data.get("description", ""),
-        })
+        amount = float(data.get("amount", 0.0))
+        is_allocation = data.get("source") == "allocation"
+        total_income += amount
+        if is_allocation:
+            total_alloc += amount
+
+        month_incomes.append(
+            {
+                "date": data.get("date", ""),
+                "amount": amount,
+                "isAllocation": is_allocation,
+                "description": data.get("description", ""),
+            }
+        )
+
+    total_extra = total_income - total_alloc
 
     # -------------------------------------------------------------------
     # Interface HTML
@@ -870,8 +889,8 @@ def income():
     for tr in month_incomes:
         badge = (
             '<span class="badge bg-success-subtle text-success border border-success-subtle">Allocation</span>'
-            if tr["isAllocation"] else
-            '<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Ponctuelle</span>'
+            if tr["isAllocation"]
+            else '<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Ponctuelle</span>'
         )
         rows_html += f"""
         <tr>
@@ -913,6 +932,9 @@ def income():
                   value="{allocation_amount:.2f}"
                   required
                 >
+                <div class="form-text">
+                  La modification s’applique au mois en cours et à tous les mois suivants de l’année scolaire.
+                </div>
               </div>
 
               <div class="d-grid">
@@ -955,7 +977,20 @@ def income():
 
     <hr class="my-4">
 
-    <h2 class="h5 mb-3">Recettes du mois {year_month}</h2>
+    <div class="row g-4 mb-3">
+      <div class="col-lg-5">
+        <div class="card shadow-sm border-0">
+          <div class="card-body">
+            <h5 class="card-title mb-3">Résumé du mois {year_month}</h5>
+            <p class="mb-1">Total des recettes : <strong>{total_income:.2f} €</strong></p>
+            <p class="mb-1">Dont allocations : <strong>{total_alloc:.2f} €</strong></p>
+            <p class="mb-0">Recettes ponctuelles : <strong>{total_extra:.2f} €</strong></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <h2 class="h5 mb-3">Détail des recettes du mois {year_month}</h2>
 
     <div class="table-responsive">
       <table class="table table-sm align-middle">
@@ -975,7 +1010,6 @@ def income():
     """
 
     return render_page(body, "Recettes")
-
 
 
 
