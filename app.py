@@ -1514,6 +1514,24 @@ def cancel_last_operation():
 # -------------------------------------------------------------------
 # Interface chef : Avances
 # -------------------------------------------------------------------
+@app.route("/chef/advances/<tx_id>/mark-reimbursed")
+def chef_mark_reimbursed(tx_id):
+    require_login()
+    require_chef_or_admin()
+
+    ref = db.collection(TRANSACTIONS_COLLECTION).document(tx_id)
+    snap = ref.get()
+    if not snap.exists:
+        abort(404)
+
+    ref.update(
+        {
+            "advanceStatus": "rembourse",
+            "updatedAt": utc_now_iso(),
+        }
+    )
+    flash("Avance marquée remboursée.", "success")
+    return redirect(url_for("chef_advances"))
 
 @app.route("/chef/advances")
 def chef_advances():
