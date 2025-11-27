@@ -1866,6 +1866,105 @@ def chef_city_transactions():
     return render_page(body, "Compta maison")
 
 
+@app.route("/chef/compta/export")
+def chef_city_transactions_export():
+    require_login()
+    require_chef_or_admin()
+    user = current_user()
+    today = date.today()
+
+    mode = request.args.get("mode", "month")
+    year_str = request.args.get("year")
+    month_str = request.args.get("month")
+
+    if year_str:
+        try:
+            year = int(year_str)
+        except ValueError:
+            year = today.year
+    else:
+        year = today.year
+
+    if month_str:
+        try:
+            month = int(month_str)
+        except ValueError:
+            month = today.month
+    else:
+        month = today.month
+
+    selected_date = date(year, max(1, min(12, month)), 1)
+    year_month = get_year_month(selected_date)
+    school_year = get_school_year_for_date(selected_date)
+
+    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", user["cityId"])
+
+    if mode == "schoolyear":
+        q = q.where("schoolYear", "==", school_year)
+        filename = f"chef_compta_{user['cityId']}_{school_year}.csv"
+    else:
+        q = q.where("yearMonth", "==", year_month)
+        filename = f"chef_compta_{user['cityId']}_{year_month}.csv"
+
+    q = q.order_by("date")
+
+    try:
+        docs = list(q.stream())
+    except Exception:
+        flash("Firestore demande peut-être un index pour l'export (chef_city_transactions_export).", "error")
+        return redirect(url_for("chef_city_transactions", mode=mode, year=year, month=month))
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(
+        [
+            "date",
+            "yearMonth",
+            "schoolYear",
+            "type",
+            "source",
+            "amount",
+            "paymentMethod",
+            "categoryName",
+            "description",
+            "userFullName",
+            "isAdvance",
+            "advanceStatus",
+        ]
+    )
+
+    for doc in docs:
+        t = doc.to_dict()
+        u = get_user_by_id(t.get("userId"))
+        uname = u["fullName"] if u else ""
+        writer.writerow(
+            [
+                t.get("date"),
+                t.get("yearMonth"),
+                t.get("schoolYear"),
+                t.get("type"),
+                t.get("source"),
+                t.get("amount"),
+                t.get("paymentMethod"),
+                t.get("categoryName"),
+                t.get("description"),
+                uname,
+                t.get("isAdvance"),
+                t.get("advanceStatus"),
+            ]
+        )
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        csv_content,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+
 # -------------------------------------------------------------------
 # Admin : Compta (voir / annuler / exporter opérations)
 # -------------------------------------------------------------------
