@@ -2061,6 +2061,58 @@ def admin_dashboard():
     return render_page(body, "Administration")
 
 
+# -------------------------------------------------------------------
+# Admin : Réinitialiser l'année scolaire en cours
+# -------------------------------------------------------------------
+
+@app.route("/admin/reset-year", methods=["POST"])
+def admin_reset_year():
+    require_login()
+    require_admin()
+
+    user = current_user()
+
+    # Mot de passe saisi dans le formulaire
+    admin_password = request.form.get("admin_password", "").strip()
+
+    if not admin_password:
+        flash("Mot de passe admin requis.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    from werkzeug.security import check_password_hash
+
+    password_hash = user.get("passwordHash")
+    if not password_hash or not check_password_hash(password_hash, admin_password):
+        flash("Mot de passe admin incorrect.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    # Année scolaire à réinitialiser
+    today = date.today()
+    school_year = get_school_year_for_date(today)
+
+    # 1) Suppression de TOUTES les transactions de l'année scolaire
+    tx_query = (
+        db.collection(TRANSACTIONS_COLLECTION)
+        .where("schoolYear", "==", school_year)
+        .stream()
+    )
+    for doc in tx_query:
+        doc.reference.delete()
+
+    # 2) Suppression de TOUTES les allocations de l'année scolaire
+    alloc_query = (
+        db.collection(ALLOCATIONS_COLLECTION)
+        .where("schoolYear", "==", school_year)
+        .stream()
+    )
+    for doc in alloc_query:
+        doc.reference.delete()
+
+    flash(
+        f"Année scolaire {school_year} réinitialisée : toutes les recettes, dépenses et allocations ont été supprimées.",
+        "success",
+    )
+    return redirect(url_for("admin_dashboard"))
 
 
 # -------------------------------------------------------------------
@@ -2420,6 +2472,7 @@ def admin_categories():
     """
     return render_page(body, "Catégories dépenses")
 
+
 @app.route("/admin/categories/<cat_id>/disable")
 def admin_category_disable(cat_id):
     require_login()
@@ -2439,6 +2492,7 @@ def admin_category_disable(cat_id):
         flash("Catégorie désactivée.", "success")
 
     return redirect(url_for("admin_categories"))
+
 
 # -------------------------------------------------------------------
 # Admin : gestion des utilisateurs + villes
@@ -2561,7 +2615,6 @@ def admin_users():
                 }
             )
     except Exception:
-        # Si problème Firestore, on laisse vide
         cities = []
 
     # Si aucune ville configurée, on propose Strasbourg / Colmar par défaut
@@ -2573,7 +2626,6 @@ def admin_users():
 
     # Récupération des utilisateurs
     users = []
-    # IMPORTANT : on ne met qu'un seul order_by pour éviter d'exiger un index composite
     docs = db.collection(USERS_COLLECTION).order_by("fullName").stream()
     for doc in docs:
         data = doc.to_dict()
@@ -2734,8 +2786,6 @@ def admin_users():
     """
 
     return render_page(body, "Admin utilisateurs")
-
-
 
 # -------------------------------------------------------------------
 # Initialisation complète (villes + 7 utilisateurs)
