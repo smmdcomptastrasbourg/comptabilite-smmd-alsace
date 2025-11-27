@@ -2072,7 +2072,7 @@ def admin_index():
     return render_page(body, "Admin – Tableau de bord")
 
 # -------------------------------------------------------------------
-# Admin : Réinitialiser l'année scolaire en cours
+# Admin : Réinitialiser l'année scolaire en cours (tout remettre à zéro)
 # -------------------------------------------------------------------
 
 @app.route("/admin/reset-year", methods=["POST"])
@@ -2092,23 +2092,40 @@ def admin_reset_year():
     today = date.today()
     school_year = get_school_year_for_date(today)
 
-    # Supprimer toutes les transactions (recettes + dépenses) de l'année scolaire en cours
-    q = db.collection(TRANSACTIONS_COLLECTION).where("schoolYear", "==", school_year)
+    # 1) Supprimer toutes les transactions (recettes + dépenses) de l'année scolaire
+    tx_query = db.collection(TRANSACTIONS_COLLECTION).where("schoolYear", "==", school_year)
 
-    deleted = 0
+    deleted_tx = 0
     try:
-        for doc in q.stream():
+        for doc in tx_query.stream():
             doc.reference.delete()
-            deleted += 1
+            deleted_tx += 1
     except Exception:
-        flash("Erreur lors de la réinitialisation. Vérifie Firestore ou les index.", "error")
+        flash("Erreur lors de la suppression des opérations. Vérifie Firestore ou les index.", "error")
+        return redirect(url_for("admin_index"))
+
+    # 2) Supprimer toutes les allocations de l'année scolaire
+    alloc_query = (
+        db.collection(ALLOCATIONS_COLLECTION)
+        .where("schoolYear", "==", school_year)
+    )
+
+    deleted_alloc = 0
+    try:
+        for doc in alloc_query.stream():
+            doc.reference.delete()
+            deleted_alloc += 1
+    except Exception:
+        flash("Erreur lors de la suppression des allocations. Vérifie Firestore ou les index.", "error")
         return redirect(url_for("admin_index"))
 
     flash(
-        f"Année scolaire {school_year} réinitialisée : {deleted} opérations (recettes + dépenses) supprimées.",
+        f"Toute l'année scolaire {school_year} a été réinitialisée : "
+        f"{deleted_tx} opérations supprimées et {deleted_alloc} allocations supprimées.",
         "success",
     )
     return redirect(url_for("admin_index"))
+
 
 # -------------------------------------------------------------------
 # Admin : Compta (voir / annuler / exporter opérations)
