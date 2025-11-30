@@ -7,22 +7,19 @@ import hashlib
 import bcrypt
 import os
 from firebase_admin import credentials, initialize_app, firestore
-# Dans app.py:
-firebase_config_str = os.environ.get('__firebase_config')
-# ...
-firebase_config = json.loads(firebase_config_str)
-cred = credentials.Certificate(firebase_config)
-# --- Configuration ---
+
+# --- Configuration & Constantes ---
+# Variables d'environnement de l'environnement Canvas
 APP_ID = os.environ.get('__app_id', 'compta-smmd-default')
 USER_ID = os.environ.get('__user_id', 'unknown_user') 
 
-# Chemins Firestore
+# Chemins Firestore (Public Data pour la collaboration)
 COL_USERS = f"artifacts/{APP_ID}/public/data/smmd_users"
 COL_HOUSES = f"artifacts/{APP_ID}/public/data/smmd_houses"
 COL_TRANSACTIONS = f"artifacts/{APP_ID}/public/data/smmd_transactions"
 COL_ALLOCATIONS = f"artifacts/{APP_ID}/public/data/smmd_allocations"
 
-# Constantes
+# Constantes de l'application
 ROLES = ["admin", "chef_de_maison", "normal"]
 TITLES = ["Abbé", "Frère"]
 PAYMENT_METHODS = ["CB Maison", "CB Personnelle (Avance)", "Chèque Personnel (Avance)", "Liquide Personnel (Avance)"]
@@ -31,6 +28,7 @@ HOUSE_PAYMENT_METHODS = ["CB Maison"]
 # --- Initialisation Firebase ---
 @st.cache_resource
 def initialize_firebase():
+    """Initialise Firebase Admin SDK avec les variables d'environnement de Canvas."""
     try:
         firebase_config_str = os.environ.get('__firebase_config')
         if not firebase_config_str:
@@ -41,38 +39,41 @@ def initialize_firebase():
         cred = credentials.Certificate(firebase_config)
         
         try:
+            # Tente d'initialiser une nouvelle app
             app = initialize_app(cred, name=APP_ID)
         except ValueError:
+            # Si elle est déjà initialisée, récupère l'instance existante
             import firebase_admin
             app = firebase_admin.get_app(name=APP_ID)
             
         return firestore.client(app=app)
     except Exception as e:
-        st.error(f"Erreur init: {e}")
+        st.error(f"Erreur d'initialisation de Firebase: {e}")
         return None
 
 db = initialize_firebase()
 if db is None:
     st.stop()
 
-# --- Authentification ---
+
+# --- Authentification & Utilisateurs ---
 def hash_password(password):
-    # Génère un nouveau salt et hache le mot de passe
-    # Le mot de passe et le salt sont encodés en bytes
+    """Hache le mot de passe en utilisant Bcrypt."""
     password_bytes = password.encode('utf-8')
-    # Utilisation d'un facteur de coût par défaut (12 est généralement recommandé)
+    # Utilise bcrypt.gensalt() pour générer un salt (intégré au hash)
     hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
-    
-    # Stocke le hash sous forme de chaîne (string) pour Firestore
     return hashed.decode('utf-8')
+
 @st.cache_data
 def get_all_users(refresh=False):
+    """Récupère tous les utilisateurs (caché par défaut)."""
     try:
         docs = db.collection(COL_USERS).stream()
         return {doc.id: doc.to_dict() for doc in docs}
     except: return {}
 
 def authenticate_user(username, password):
+    """Vérifie les identifiants de l'utilisateur avec Bcrypt."""
     try:
         q = db.collection(COL_USERS).where('username', '==', username).limit(1).stream()
         user_doc = next(q, None)
@@ -81,14 +82,10 @@ def authenticate_user(username, password):
             user_data = user_doc.to_dict()
             stored_hash = user_data.get('password_hash', '').encode('utf-8')
             
-            # 💡 Bcrypt vérifie si le mot de passe correspond au hash stocké
-            # y compris le salt qui est intégré dans le hash.
             password_bytes = password.encode('utf-8')
             
-            # --- Ligne de vérification critique ---
+            # Vérification Bcrypt
             if bcrypt.checkpw(password_bytes, stored_hash):
-            # --------------------------------------
-            
                 st.session_state['logged_in'] = True
                 st.session_state['user_data'] = user_data
                 st.session_state['user_id'] = user_doc.id 
@@ -98,18 +95,20 @@ def authenticate_user(username, password):
                 
         return False
     except Exception as e: 
-        # Catcher les erreurs liées à Bcrypt ou Firestore
         print(f"Auth Error: {e}")
         return False
 
 def logout():
+    """Déconnecte l'utilisateur et recharge l'application."""
     st.session_state['logged_in'] = False
     st.session_state['user_data'] = {}
     st.session_state['role'] = None
     st.rerun()
 
-# --- Transactions & Calculs ---
+# --- Transactions & Maisons (Récupération) ---
+
 def save_transaction(house_id, user_id, type, amount, nature, payment_method=None, notes=None):
+    """Enregistre une nouvelle transaction dans Firestore."""
     try:
         data = {
             'house_id': house_id, 'user_id': user_id, 'type': type,
@@ -128,6 +127,7 @@ def save_transaction(house_id, user_id, type, amount, nature, payment_method=Non
 
 @st.cache_data(ttl=60)
 def get_house_transactions(house_id):
+    """Récupère toutes les transactions d'une maison donnée."""
     try:
         query = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
         return pd.DataFrame([d.to_dict() | {'doc_id': d.id} for d in query])
@@ -135,6 +135,7 @@ def get_house_transactions(house_id):
 
 @st.cache_data
 def get_all_houses():
+    """Récupère toutes les maisons (villes) enregistrées."""
     try:
         docs = db.collection(COL_HOUSES).stream()
         return {doc.id: doc.to_dict() for doc in docs}
@@ -142,12 +143,14 @@ def get_all_houses():
 
 @st.cache_data
 def get_house_name(house_id):
+    """Récupère le nom d'une maison à partir de son ID."""
     try:
         doc = db.collection(COL_HOUSES).document(house_id).get()
         return doc.to_dict().get('name', 'Inconnue') if doc.exists else 'Inconnue'
     except: return 'Inconnue'
 
 def calculate_balances(df, uid):
+    """Calcule le solde de la maison et le solde des avances de l'utilisateur."""
     recettes = df[df['type'].str.contains('recette')]['amount'].sum()
     depenses_maison = df[df['payment_method'] == 'CB Maison']['amount'].sum()
     house_bal = round(recettes - depenses_maison, 2)
@@ -158,21 +161,26 @@ def calculate_balances(df, uid):
     return house_bal, perso_bal
 
 def set_monthly_allocation(user_id, house_id, amount):
+    """Met à jour l'allocation mensuelle et l'enregistre comme transaction."""
     amount = round(float(amount), 2)
     db.collection(COL_ALLOCATIONS).document(user_id).set({'amount': amount, 'updated': datetime.now().isoformat()})
     
     current_month = datetime.now().strftime('%Y-%m')
+    # Cherche si l'allocation du mois existe déjà pour cet utilisateur
     q = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).where('month_year', '==', current_month).where('type', '==', 'recette_mensuelle').limit(1).stream()
     ex = next(q, None)
     
     u_name = st.session_state['user_data'].get('first_name', 'User')
     if ex:
+        # Met à jour la transaction existante
         db.collection(COL_TRANSACTIONS).document(ex.id).update({'amount': amount})
     else:
+        # Crée une nouvelle transaction d'allocation
         save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Alloc {u_name}")
     st.rerun()
 
 def delete_transaction(doc_id):
+    """Supprime une transaction par son ID de document."""
     try:
         db.collection(COL_TRANSACTIONS).document(doc_id).delete()
         st.toast("Supprimé !", icon='🗑️')
@@ -180,7 +188,8 @@ def delete_transaction(doc_id):
         st.rerun()
     except Exception as e: st.error(str(e))
 
-# --- Suppression ---
+
+# --- Fonctions de Suppression Admin ---
 
 def delete_user(user_id):
     """Supprime un utilisateur de la collection COL_USERS."""
@@ -201,7 +210,7 @@ def delete_user(user_id):
 def delete_house(house_id):
     """
     Supprime une maison de la collection COL_HOUSES.
-    ⚠️ Avertissement: Les transactions associées ne sont PAS supprimées par cette fonction.
+    ⚠️ Avertissement: Les transactions associées ne sont PAS supprimées.
     """
     try:
         doc_ref = db.collection(COL_HOUSES).document(house_id)
@@ -213,7 +222,7 @@ def delete_house(house_id):
             get_all_houses.clear()
             get_house_name.clear()
             get_house_transactions.clear() 
-            st.rerun() # Recharger l'app pour rafraîchir les listes
+            st.rerun() 
             return True
         else:
             st.error(f"Maison {house_id} introuvable.")
@@ -222,13 +231,89 @@ def delete_house(house_id):
         st.error(f"Erreur suppression maison: {e}")
         return False
 
-# --- Interfaces ---
+# ----------------------------------------------------
+# --- Définition des Interfaces Utilisateur (User) ---
+# ----------------------------------------------------
+
+def user_dashboard():
+    """Affiche le tableau de bord de l'utilisateur standard."""
+    hid = st.session_state['house_id']
+    role = st.session_state['role']
+    df = get_house_transactions(hid)
+    h_bal, p_bal = calculate_balances(df, st.session_state['user_id']) if not df.empty else (0,0)
+    
+    st.title(f"🏠 {get_house_name(hid)}")
+    c1, c2 = st.columns(2)
+    c1.metric("Solde Maison", f"{h_bal} €")
+    c2.metric("Vos Avances", f"{p_bal} €")
+    
+    tabs = ["Recettes", "Dépenses"]
+    if role == 'chef_de_maison': tabs.append("Chef")
+    
+    t_list = st.tabs(tabs)
+    
+    with t_list[0]: # Recettes
+        st.subheader("Enregistrer une Recette")
+        with st.form("alloc"):
+            st.markdown("**Allocation Mensuelle**")
+            v = st.number_input("Montant de l'allocation", min_value=0.0, key="alloc_v")
+            if st.form_submit_button("Valider Allocation", key="alloc_btn"): 
+                set_monthly_allocation(st.session_state['user_id'], hid, v)
+        
+        st.markdown("---")
+        with st.form("rec"):
+            st.markdown("**Recette Exceptionnelle**")
+            v = st.number_input("Montant", min_value=0.0, key="rec_v")
+            n = st.text_input("Nature (ex: Remboursement prêt)", key="rec_n")
+            if st.form_submit_button("Ajouter Recette", key="rec_btn"): 
+                save_transaction(hid, st.session_state['user_id'], 'recette_exceptionnelle', v, n)
+                st.rerun()
+
+    with t_list[1]: # Dépenses
+        st.subheader("Enregistrer une Dépense")
+        with st.form("dep"):
+            v = st.number_input("Montant", min_value=0.0, key="dep_v")
+            n = st.text_input("Nature (ex: Courses Leclerc)", key="dep_n")
+            m = st.radio("Moyen de Paiement", PAYMENT_METHODS, key="dep_m")
+            if st.form_submit_button("Ajouter Dépense", key="dep_btn"):
+                typ = 'depense_maison' if m in HOUSE_PAYMENT_METHODS else 'depense_avance'
+                save_transaction(hid, st.session_state['user_id'], typ, v, n, m)
+                st.rerun()
+
+    if role == 'chef_de_maison' and len(t_list) > 2:
+        with t_list[2]: # Chef (Validation des Avances)
+            st.subheader("Historique des Transactions")
+            if not df.empty:
+                st.dataframe(df)
+                pending = df[(df['type'] == 'depense_avance') & (df['status'] == 'en_attente_remboursement')]
+                if not pending.empty:
+                    st.warning(f"{len(pending)} avance(s) en attente de remboursement")
+                    uids = pending['user_id'].unique()
+                    
+                    st.markdown("---")
+                    st.subheader("Valider les Remboursements")
+                    u = st.selectbox("Membre à rembourser", uids)
+                    
+                    if st.button(f"Confirmer le Remboursement des avances de {u}"):
+                        # Marque toutes les avances d'un utilisateur comme remboursées
+                        for d in db.collection(COL_TRANSACTIONS).where('user_id','==',u).where('status','==','en_attente_remboursement').stream():
+                            db.collection(COL_TRANSACTIONS).document(d.id).update({'status': 'remboursé'})
+                        st.success("Remboursements validés. Actualisation...")
+                        get_house_transactions.clear()
+                        st.rerun()
+                else:
+                    st.info("Aucune avance en attente de remboursement.")
+
+
+# ----------------------------------------------------
+# --- Définition de l'Interface Admin ---
+# ----------------------------------------------------
 def admin_interface():
     st.header("👑 Admin")
     t1, t2, t3 = st.tabs(["Utilisateurs", "Maisons", "Audit"])
     
     # ---------------------------
-    # T1: Utilisateurs
+    # T1: Utilisateurs (Création & Suppression)
     # ---------------------------
     with t1:
         st.subheader("Créer un nouvel utilisateur")
@@ -245,7 +330,6 @@ def admin_interface():
             
             if st.form_submit_button("Créer"):
                 uname = f"{fn.lower()}_{ln.lower()}"
-                # Note: Vous devriez ajouter ici une vérification si l'uname existe déjà
                 if pw:
                     db.collection(COL_USERS).document(uname).set({
                         'title': ti, 'first_name': fn, 'last_name': ln, 'username': uname,
@@ -278,7 +362,7 @@ def admin_interface():
 
 
     # ---------------------------
-    # T2: Maisons
+    # T2: Maisons (Création & Suppression)
     # ---------------------------
     with t2:
         st.subheader("Créer une nouvelle maison")
@@ -299,7 +383,7 @@ def admin_interface():
             house_to_delete_name = st.selectbox("Maison à supprimer", list(h_opts.keys()), key="del_house_select")
             house_to_delete_id = h_opts[house_to_delete_name]
 
-            st.error("⚠️ Cette action est IRRÉVERSIBLE et ne supprime **PAS** les transactions liées dans Firestore.")
+            st.error("⚠️ Cette action est IRRÉVERSIBLE et ne supprime **PAS** les transactions liées dans Firestore. Vous devrez les supprimer manuellement ou les réaffecter.")
 
             if st.button(f"🗑️ Confirmer la suppression de la maison '{house_to_delete_name}'", key="del_house_btn"):
                 delete_house(house_to_delete_id)
@@ -311,26 +395,17 @@ def admin_interface():
     # T3: Audit
     # ---------------------------
     with t3:
+        st.subheader("Audit des Transactions")
         all_tx = [d.to_dict() | {'id': d.id} for d in db.collection(COL_TRANSACTIONS).stream()]
         if all_tx: st.dataframe(pd.DataFrame(all_tx))
+        else: st.info("Aucune transaction enregistrée.")
 
-# --- Main Loop ---
-if __name__ == '__main__':
-    st.set_page_config(page_title="Compta Smmd", page_icon="💰")
-    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
-    
-    if st.session_state['logged_in']:
-        if st.sidebar.button("Déconnexion"): logout()
-        if st.session_state['role'] == 'admin': admin_interface()
-        else: user_dashboard()
-    else:
-        st.title("Connexion")
-        u = st.text_input("User (prenom_nom)")
-        p = st.text_input("Password", type="password")
-        if st.button("Se connecter"):
-            if authenticate_user(u, p): st.rerun()
-            else: st.error("Erreur")
+
+# ----------------------------------------------------
+# --- Définition du Style CSS pour le bandeau rouge ---
+# ----------------------------------------------------
 def set_red_theme_band():
+    """Injecte du CSS pour colorer le bandeau supérieur en rouge."""
     st.markdown("""
     <style>
     /* Change la couleur de fond de la barre latérale */
@@ -342,7 +417,7 @@ def set_red_theme_band():
     [data-testid="stHeader"] {
         background-color: #FF4B4B; /* Rouge vif de Streamlit */
     }
-    /* S'assurer que le texte/logo dans le bandeau reste visible */
+    /* S'assurer que le texte/logo dans le bandeau reste visible (Correction de l'accolade) */
     [data-testid="stHeader"] .st-emotion-cache-18ni91u, 
     [data-testid="stHeader"] .st-emotion-cache-12qukfr {
         color: white; 
@@ -351,15 +426,36 @@ def set_red_theme_band():
     """, unsafe_allow_html=True)
 
 
+# ----------------------------------------------------
+# --- Main Loop (Démarrage de l'Application) ---
+# ----------------------------------------------------
 if __name__ == '__main__':
-    st.set_page_config(page_title="Compta Smmd", page_icon="💰")
+    st.set_page_config(page_title="Compta Smmd", page_icon="💰", layout="wide")
     
-    # --- Appel de la nouvelle fonction ---
+    # 🎨 Appel du style pour le bandeau rouge
     set_red_theme_band() 
-    # ------------------------------------
-
+    
     if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
     
-    # ... le reste de votre application
+    if st.session_state['logged_in']:
+        # Barre latérale pour la déconnexion
+        with st.sidebar:
+            st.write(f"Connecté: {st.session_state['user_data'].get('first_name')} ({st.session_state['role']})")
+            if st.button("Déconnexion", key="sidebar_logout"): logout()
 
-
+        # Affichage de l'interface appropriée
+        if st.session_state['role'] == 'admin':
+            admin_interface()
+        else:
+            user_dashboard()
+    else:
+        # Interface de Connexion
+        st.title("Connexion")
+        u = st.text_input("Nom d'utilisateur (prenom_nom)")
+        p = st.text_input("Mot de passe", type="password")
+        if st.button("Se connecter", key="login_btn"):
+            if authenticate_user(u, p): 
+                st.toast("Connexion réussie !", icon='🥳')
+                st.rerun()
+            else: 
+                st.error("Nom d'utilisateur ou mot de passe incorrect.")
