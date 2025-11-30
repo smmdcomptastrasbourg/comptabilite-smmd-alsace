@@ -1,2891 +1,335 @@
-import os
-import csv
-import io
+import streamlit as st
+import pandas as pd
 import json
-from google.oauth2 import service_account
+import os
+from datetime import datetime
+import hashlib
+import bcrypt
+import os
+from firebase_admin import credentials, initialize_app, firestore
+# Dans app.py:
+firebase_config_str = os.environ.get('__firebase_config')
+# ...
+firebase_config = json.loads(firebase_config_str)
+cred = credentials.Certificate(firebase_config)
+# --- Configuration ---
+APP_ID = os.environ.get('__app_id', 'compta-smmd-default')
+USER_ID = os.environ.get('__user_id', 'unknown_user') 
 
-from datetime import datetime, date
+# Chemins Firestore
+COL_USERS = f"artifacts/{APP_ID}/public/data/smmd_users"
+COL_HOUSES = f"artifacts/{APP_ID}/public/data/smmd_houses"
+COL_TRANSACTIONS = f"artifacts/{APP_ID}/public/data/smmd_transactions"
+COL_ALLOCATIONS = f"artifacts/{APP_ID}/public/data/smmd_allocations"
 
-from flask import (
-    Flask,
-    request,
-    redirect,
-    url_for,
-    session,
-    render_template_string,
-    abort,
-    flash,
-    Response,
-)
-from google.cloud import firestore
-from werkzeug.security import generate_password_hash, check_password_hash
-from dotenv import load_dotenv
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "odile+++")
-MASTER_PASSWORD = os.getenv("MASTER_PASSWORD", "odile+++")
+# Constantes
+ROLES = ["admin", "chef_de_maison", "normal"]
+TITLES = ["Abbé", "Frère"]
+PAYMENT_METHODS = ["CB Maison", "CB Personnelle (Avance)", "Chèque Personnel (Avance)", "Liquide Personnel (Avance)"]
+HOUSE_PAYMENT_METHODS = ["CB Maison"]
 
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
-# -------------------------------------------------------------------
-# Configuration générale
-# -------------------------------------------------------------------
-
-load_dotenv()
-
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
-
-# -------------------------------------------------------------------
-# Initialisation Firestore avec credentials explicites
-# -------------------------------------------------------------------
-creds_json_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-creds_file_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-
-if creds_json_env:
-    # Cas déploiement (Render) : la clé JSON est dans une variable d'environnement
-    creds_dict = json.loads(creds_json_env)
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    db = firestore.Client(credentials=credentials, project=creds_dict["project_id"])
-
-elif creds_file_env and os.path.exists(creds_file_env):
-    # Cas local (Codespaces) : la variable pointe vers un fichier JSON
-    with open(creds_file_env, "r") as f:
-        creds_dict = json.load(f)
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    db = firestore.Client(credentials=credentials, project=creds_dict["project_id"])
-
-else:
-    # Rien n'est configuré : on stoppe tout avec un message explicite
-    raise RuntimeError(
-        "Aucun identifiant Firestore trouvé. "
-        "Définis soit GOOGLE_APPLICATION_CREDENTIALS vers le fichier JSON (local), "
-        "soit GOOGLE_APPLICATION_CREDENTIALS_JSON avec le contenu JSON (Render)."
-)
-
-USERS_COLLECTION = "users"
-CITIES_COLLECTION = "cities"
-ALLOC_CONFIGS_COLLECTION = "allocationConfigs"
-TRANSACTIONS_COLLECTION = "transactions"
-EXPENSE_CATEGORIES_COLLECTION = "expenseCategories"
-ALLOCATIONS_COLLECTION = "allocations"
-CITIES_COLLECTION = "cities"
-
-
-# -------------------------------------------------------------------
-# Utilitaires généraux
-# -------------------------------------------------------------------
-
-def utc_now_iso() -> str:
-    return datetime.utcnow().isoformat()
-
-def get_school_year_for_date(d: date) -> str:
-    if d.month >= 9:
-        start_year = d.year
-        end_year = d.year + 1
-    else:
-        start_year = d.year - 1
-        end_year = d.year
-    return f"{start_year}-{end_year}"
-
-def get_year_month(d: date) -> str:
-    return f"{d.year:04d}-{d.month:02d}"
-
-# -------------------------------------------------------------------
-# Villes (Firestore)
-# -------------------------------------------------------------------
-
-def init_cities():
-    cities = {
-        "strasbourg": {
-            "name": "Strasbourg",
-            "schoolYearStartMonth": 9,
-            "schoolYearStartDay": 1,
-            "schoolYearEndMonth": 8,
-            "schoolYearEndDay": 31,
-            "createdAt": utc_now_iso(),
-            "updatedAt": utc_now_iso(),
-        },
-        "colmar": {
-            "name": "Colmar",
-            "schoolYearStartMonth": 9,
-            "schoolYearStartDay": 1,
-            "schoolYearEndMonth": 8,
-            "schoolYearEndDay": 31,
-            "createdAt": utc_now_iso(),
-            "updatedAt": utc_now_iso(),
-        },
-    }
-    for cid, data in cities.items():
-        doc_ref = db.collection(CITIES_COLLECTION).document(cid)
-        if not doc_ref.get().exists:
-            doc_ref.set(data)
-            print(f"Ville créée : {cid}")
-
-# -------------------------------------------------------------------
-# Utilisateurs
-# -------------------------------------------------------------------
-
-def get_user_doc_ref(user_id: str):
-    return db.collection(USERS_COLLECTION).document(user_id)
-
-def get_user_by_login(login: str):
-    docs = (
-        db.collection(USERS_COLLECTION)
-        .where("login", "==", login)
-        .limit(1)
-        .stream()
-    )
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
-
-def get_user_by_id(user_id: str):
-    doc = get_user_doc_ref(user_id).get()
-    if doc.exists:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
-
-def create_user(
-    user_id: str,
-    full_name: str,
-    short_name: str,
-    login: str,
-    city_id: str,
-    role: str,
-    temp_password: str | None = None,
-    must_change_password: bool = True,
-):
-    now = utc_now_iso()
-    if temp_password:
-        password_hash = generate_password_hash(temp_password)
-    else:
-        password_hash = None
-
-    data = {
-        "fullName": full_name,
-        "shortName": short_name,
-        "cityId": city_id,
-        "role": role,
-        "active": True,
-        "login": login,
-        "passwordHash": password_hash,
-        "mustChangePassword": must_change_password,
-        "passwordSetAt": None,
-        "lastLoginAt": None,
-        "createdAt": now,
-        "updatedAt": now,
-    }
-    get_user_doc_ref(user_id).set(data, merge=False)
-    return data
-
-def update_user(user_id: str, **fields):
-    fields["updatedAt"] = utc_now_iso()
-    get_user_doc_ref(user_id).update(fields)
-
-# -------------------------------------------------------------------
-# Catégories de dépenses
-# -------------------------------------------------------------------
-
-def get_active_expense_categories():
-    """Catégories actives, triées par nom."""
-    docs = (
-        db.collection(EXPENSE_CATEGORIES_COLLECTION)
-        .where("active", "==", True)
-        .order_by("name")
-        .stream()
-    )
-    categories = []
-    for doc in docs:
-        d = doc.to_dict()
-        d["id"] = doc.id
-        categories.append(d)
-    return categories
-
-# -------------------------------------------------------------------
-# Allocation mensuelle
-# -------------------------------------------------------------------
-
-def get_allocation_config(user_id: str, school_year: str):
-    docs = (
-        db.collection(ALLOC_CONFIGS_COLLECTION)
-        .where("userId", "==", user_id)
-        .where("schoolYear", "==", school_year)
-        .where("active", "==", True)
-        .limit(1)
-        .stream()
-    )
-    for doc in docs:
-        data = doc.to_dict()
-        data["id"] = doc.id
-        return data
-    return None
-
-def upsert_allocation_config(user_id: str, city_id: str, school_year: str, monthly_amount: float):
-    existing = get_allocation_config(user_id, school_year)
-    now = utc_now_iso()
-    if existing:
-        doc_ref = db.collection(ALLOC_CONFIGS_COLLECTION).document(existing["id"])
-        doc_ref.update(
-            {
-                "monthlyAmount": monthly_amount,
-                "updatedAt": now,
-            }
-        )
-        return existing["id"]
-    else:
-        doc_ref = db.collection(ALLOC_CONFIGS_COLLECTION).document()
-        doc_ref.set(
-            {
-                "userId": user_id,
-                "cityId": city_id,
-                "schoolYear": school_year,
-                "monthlyAmount": monthly_amount,
-                "active": True,
-                "createdAt": now,
-                "updatedAt": now,
-            }
-        )
-        return doc_ref.id
-
-# -------------------------------------------------------------------
-# Transactions
-# -------------------------------------------------------------------
-
-def create_transaction(
-    city_id: str,
-    user_id: str | None,
-    d: date,
-    ttype: str,
-    source: str,
-    amount: float,
-    payment_method: str | None,
-    is_advance: bool,
-    advance_status: str | None,
-    description: str,
-    category_id: str | None = None,
-    category_name: str | None = None,
-):
-    now = utc_now_iso()
-    school_year = get_school_year_for_date(d)
-    year_month = get_year_month(d)
-    doc_ref = db.collection(TRANSACTIONS_COLLECTION).document()
-    data = {
-        "cityId": city_id,
-        "userId": user_id,
-        "schoolYear": school_year,
-        "yearMonth": year_month,
-        "date": d.isoformat(),
-        "type": ttype,
-        "source": source,
-        "amount": amount,
-        "paymentMethod": payment_method,
-        "isAdvance": is_advance,
-        "advanceStatus": advance_status,
-        "description": description,
-        "categoryId": category_id,
-        "categoryName": category_name,
-        "createdAt": now,
-        "updatedAt": now,
-    }
-    doc_ref.set(data)
-    data["id"] = doc_ref.id
-    return data
-
-def get_city_annual_balance(city_id: str, school_year: str) -> float:
-    docs = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("cityId", "==", city_id)
-        .where("schoolYear", "==", school_year)
-        .stream()
-    )
-    total = 0.0
-    for doc in docs:
-        data = doc.to_dict()
-        total += float(data.get("amount", 0.0))
-    return total
-
-def get_personal_monthly_balance(user_id: str, year_month: str) -> float:
-    docs = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("userId", "==", user_id)
-        .where("yearMonth", "==", year_month)
-        .stream()
-    )
-    total = 0.0
-    for doc in docs:
-        data = doc.to_dict()
-        total += float(data.get("amount", 0.0))
-    return total
-
-def ensure_allocation_transaction_for_month(user, d: date):
-    school_year = get_school_year_for_date(d)
-    year_month = get_year_month(d)
-
-    config = get_allocation_config(user["id"], school_year)
-    if not config:
-        return
-
-    docs = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("userId", "==", user["id"])
-        .where("cityId", "==", user["cityId"])
-        .where("schoolYear", "==", school_year)
-        .where("yearMonth", "==", year_month)
-        .where("source", "==", "allocation_mensuelle")
-        .limit(1)
-        .stream()
-    )
-    already = False
-    for _ in docs:
-        already = True
-        break
-
-    if not already:
-        create_transaction(
-            city_id=user["cityId"],
-            user_id=user["id"],
-            d=d,
-            ttype="income",
-            source="allocation_mensuelle",
-            amount=float(config["monthlyAmount"]),
-            payment_method="virement",
-            is_advance=False,
-            advance_status=None,
-            description=f"Allocation mensuelle {year_month}",
-        )
-
-# -------------------------------------------------------------------
-# Auth helpers
-# -------------------------------------------------------------------
-
-def login_user(user_data: dict):
-    session["user_id"] = user_data["id"]
-    session["role"] = user_data["role"]
-    session["city_id"] = user_data["cityId"]
-    session["short_name"] = user_data.get("shortName") or user_data.get("fullName")
-
-def logout_user():
-    session.clear()
-
-def current_user():
-    uid = session.get("user_id")
-    if not uid:
+# --- Initialisation Firebase ---
+@st.cache_resource
+def initialize_firebase():
+    try:
+        firebase_config_str = os.environ.get('__firebase_config')
+        if not firebase_config_str:
+            st.error("Erreur: Config Firebase introuvable.")
+            return None
+        
+        firebase_config = json.loads(firebase_config_str)
+        cred = credentials.Certificate(firebase_config)
+        
+        try:
+            app = initialize_app(cred, name=APP_ID)
+        except ValueError:
+            import firebase_admin
+            app = firebase_admin.get_app(name=APP_ID)
+            
+        return firestore.client(app=app)
+    except Exception as e:
+        st.error(f"Erreur init: {e}")
         return None
-    return get_user_by_id(uid)
-def get_school_year(d: date) -> str:
-    """
-    Retourne l'année scolaire au format 'AAAA-AAAA'.
-    Exemple : si d = 2025-11, retourne '2025-2026'.
-    """
-    year = d.year
-    if d.month >= 9:
-        return f"{year}-{year+1}"
-    else:
-        return f"{year-1}-{year}"
 
-def require_login():
-    if not session.get("user_id"):
-        return redirect(url_for("login"))
+db = initialize_firebase()
+if db is None:
+    st.stop()
 
-def require_admin():
-    user = current_user()
-    print("DEBUG require_admin user =", user)
-    if not user or not user.get("isAdmin"):
-        abort(403)
+# --- Authentification ---
+def hash_password(password):
+    # Génère un nouveau salt et hache le mot de passe
+    # Le mot de passe et le salt sont encodés en bytes
+    password_bytes = password.encode('utf-8')
+    # Utilisation d'un facteur de coût par défaut (12 est généralement recommandé)
+    hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
+    
+    # Stocke le hash sous forme de chaîne (string) pour Firestore
+    return hashed.decode('utf-8')
+@st.cache_data
+def get_all_users(refresh=False):
+    try:
+        docs = db.collection(COL_USERS).stream()
+        return {doc.id: doc.to_dict() for doc in docs}
+    except: return {}
 
+def authenticate_user(username, password):
+    try:
+        q = db.collection(COL_USERS).where('username', '==', username).limit(1).stream()
+        user_doc = next(q, None)
+        
+        if user_doc:
+            user_data = user_doc.to_dict()
+            stored_hash = user_data.get('password_hash', '').encode('utf-8')
+            
+            # 💡 Bcrypt vérifie si le mot de passe correspond au hash stocké
+            # y compris le salt qui est intégré dans le hash.
+            password_bytes = password.encode('utf-8')
+            
+            # --- Ligne de vérification critique ---
+            if bcrypt.checkpw(password_bytes, stored_hash):
+            # --------------------------------------
+            
+                st.session_state['logged_in'] = True
+                st.session_state['user_data'] = user_data
+                st.session_state['user_id'] = user_doc.id 
+                st.session_state['role'] = user_data.get('role')
+                st.session_state['house_id'] = user_data.get('house_id')
+                return True
+                
+        return False
+    except Exception as e: 
+        # Catcher les erreurs liées à Bcrypt ou Firestore
+        print(f"Auth Error: {e}")
+        return False
 
-def require_chef_or_admin():
-    user = current_user()
-    if not user or user["role"] not in ("chef", "admin"):
-        abort(403)
-
-# -------------------------------------------------------------------
-# HTML Template
-# -------------------------------------------------------------------
-
-BASE_LAYOUT = """
-<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8">
-  <title>{{ title or "Comptabilité SMMD Alsace" }}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-
-  <!-- PWA -->
-  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
-  <meta name="theme-color" content="#0d6efd">
-
-  <!-- Bootstrap CSS -->
-  <link
-    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-    rel="stylesheet"
-    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
-    crossorigin="anonymous"
-  >
-    <style>
-    body {
-      background: #f4f6fb;
-    }
-    .navbar-brand {
-      font-weight: 600;
-    }
-  </style>
-</head>
-
-<body class="bg-light">
-
-<nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
-  <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('dashboard') }}">Compta SMMD</a>
-
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarMain">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-
-    <div class="collapse navbar-collapse" id="navbarMain">
-      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-
-        {% if session.user_id %}
-
-          {% if session.role == 'admin' %}
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_transactions') }}">Admin compta</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_users') }}">Admin utilisateurs</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('admin_categories') }}">Catégories dépenses</a>
-            </li>
-
-          {% else %}
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('dashboard') }}">Tableau de bord</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('income') }}">Recettes</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('expense') }}">Dépenses</a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="{{ url_for('my_operations') }}">Mes opérations</a>
-            </li>
-
-            {% if session.role == 'chef' %}
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_city_transactions') }}">Compta maison</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_advances') }}">Avances</a>
-              </li>
-              <li class="nav-item">
-                <a class="nav-link" href="{{ url_for('chef_export') }}">Export ville</a>
-              </li>
-            {% endif %}
-          {% endif %}
-
-          <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('logout') }}">Déconnexion</a>
-          </li>
-
-        {% else %}
-          <li class="nav-item">
-            <a class="nav-link" href="{{ url_for('login') }}">Connexion</a>
-          </li>
-        {% endif %}
-      </ul>
-
-      {% if session.user_id %}
-        <span class="navbar-text text-white">
-          Bonjour {{ session.short_name }}
-        </span>
-      {% endif %}
-    </div>
-  </div>
-</nav>
-
-<div class="container my-4">
-
-  {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-      {% for category, msg in messages %}
-        <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
-          {{ msg }}
-          <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-        </div>
-      {% endfor %}
-    {% endif %}
-  {% endwith %}
-
-  {{ body|safe }}
-
-</div>
-
-<!-- Bootstrap JS -->
-<script
-  src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-  integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-  crossorigin="anonymous"
-></script>
-
-<!-- Service Worker -->
-<script>
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", function() {
-      navigator.serviceWorker.register("/service-worker.js")
-        .then(() => console.log("SW registered"))
-        .catch(error => console.log("SW registration failed:", error));
-    });
-  }
-</script>
-
-</body>
-</html>
-"""
-
-def render_page(body, title="Comptabilité SMMD Alsace"):
-    return render_template_string(BASE_LAYOUT, body=body, title=title)
-
-
-
-# -------------------------------------------------------------------
-# Routes: Authentification
-# -------------------------------------------------------------------
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    # Si on soumet le formulaire (POST)
-    if request.method == "POST":
-        ident = request.form.get("username", "").strip().lower()
-        pwd = request.form.get("password", "")
-
-        # Connexion admin
-        if ident == "admin":
-            if pwd == ADMIN_PASSWORD:
-                session["user_id"] = "admin"
-                session["role"] = "admin"
-                session["short_name"] = "Admin"
-                return redirect(url_for("admin_transactions"))
-            flash("Identifiant ou mot de passe incorrect.", "error")
-            return redirect(url_for("login"))
-
-        # Connexion utilisateur (user / chef)
-        q = db.collection(USERS_COLLECTION).where("login", "==", ident).limit(1)
-        docs = list(q.stream())
-        if not docs:
-            flash("Identifiant incorrect.", "error")
-            return redirect(url_for("login"))
-
-        user_doc = docs[0]
-        user = user_doc.to_dict()
-
-        # Premier login sans mot de passe défini
-        if "passwordHash" not in user:
-            if pwd == MASTER_PASSWORD:
-                h = generate_password_hash(MASTER_PASSWORD)
-                user_doc.reference.update({"passwordHash": h})
-                pwd_ok = True
-            else:
-                pwd_ok = False
-        else:
-            pwd_ok = check_password_hash(user["passwordHash"], pwd)
-
-        if not pwd_ok:
-            flash("Identifiant ou mot de passe incorrect.", "error")
-            return redirect(url_for("login"))
-
-        # Connexion réussie
-        session["user_id"] = user_doc.id
-        session["role"] = user.get("role", "user")
-        session["short_name"] = user.get("shortName", user.get("fullName", ident))
-
-        return redirect(url_for("dashboard"))
-
-    # Si on arrive en GET : on affiche simplement le formulaire
-    body = """
-    <div class="row justify-content-center">
-      <div class="col-md-6 col-lg-4">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-primary text-white text-center">
-            <h5 class="mb-0">Connexion</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <div class="mb-3">
-                <label class="form-label">Identifiant</label>
-                <input class="form-control" name="username" required autocomplete="username">
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Mot de passe</label>
-                <input class="form-control" name="password" type="password" required autocomplete="current-password">
-              </div>
-              <div class="d-grid">
-                <button class="btn btn-primary">Se connecter</button>
-              </div>
-            </form>
-          </div>
-          <div class="card-footer text-muted small text-center">
-            Comptabilité SMMD Alsace
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return render_page(body, "Connexion")
-
-
-@app.route("/logout")
 def logout():
-    logout_user()
-    flash("Déconnecté.", "success")
-    return redirect(url_for("login"))
-
-@app.route("/change-password", methods=["GET", "POST"])
-def change_password_first():
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
-    if request.method == "POST":
-        pwd1 = request.form.get("password1", "")
-        pwd2 = request.form.get("password2", "")
-        if len(pwd1) < 6:
-            flash("Le mot de passe doit contenir au moins 6 caractères.", "error")
-        elif pwd1 != pwd2:
-            flash("Les mots de passe ne correspondent pas.", "error")
-        else:
-            new_hash = generate_password_hash(pwd1)
-            update_user(
-                user["id"],
-                passwordHash=new_hash,
-                mustChangePassword=False,
-                passwordSetAt=utc_now_iso(),
-            )
-            flash("Mot de passe mis à jour.", "success")
-            return redirect(url_for("dashboard"))
-
-    body = """
-      <h1>Définir un nouveau mot de passe</h1>
-      <p>Vous devez définir un mot de passe personnel pour continuer.</p>
-      <form method="post">
-        <div>
-          <label>Nouveau mot de passe :</label><br>
-          <input type="password" name="password1" required>
-        </div>
-        <div>
-          <label>Confirmer le mot de passe :</label><br>
-          <input type="password" name="password2" required>
-        </div>
-        <button type="submit">Valider</button>
-      </form>
-    """
-    return render_page(body, "Nouveau mot de passe")
-
-# -------------------------------------------------------------------
-# Tableau de bord
-# -------------------------------------------------------------------
-
-@app.route("/")
-def dashboard():
-    if not session.get("user_id") or session.get("role") == "admin":
-        return redirect(url_for("login"))
-
-    user = current_user()
-    today = date.today()
-    year_month = get_year_month(today)
-    school_year = get_school_year_for_date(today)
-
-    # Solde de la ville
-    city = user["cityId"]
-    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", city)
-    total = 0
-    for d in q.stream():
-        tr = d.to_dict()
-        if tr["type"] == "income":
-            total += tr["amount"]
-        else:
-            total -= tr["amount"]
-
-    # Solde perso du mois
-    q2 = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("userId", "==", user["id"])
-        .where("yearMonth", "==", year_month)
-    )
-    perso = 0
-    for d in q2.stream():
-        tr = d.to_dict()
-        if tr["type"] == "income":
-            perso += tr["amount"]
-        else:
-            perso -= tr["amount"]
-
-    body = f"""
-    <h1 class="mb-4">Tableau de bord</h1>
-
-    <div class="row g-4">
-      <div class="col-md-6">
-        <div class="card border-0 shadow-sm">
-          <div class="card-body">
-            <h5 class="card-title">Solde de la ville</h5>
-            <p class="text-muted mb-1">Ville : <strong>{city}</strong></p>
-            <p class="display-6 mb-0">{total:.2f} €</p>
-          </div>
-        </div>
-      </div>
-
-      <div class="col-md-6">
-        <div class="card border-0 shadow-sm">
-          <div class="card-body">
-            <h5 class="card-title">Votre solde du mois</h5>
-            <p class="text-muted mb-1">Mois : <strong>{year_month}</strong></p>
-            <p class="display-6 mb-3">{perso:.2f} €</p>
-            <a href="{url_for('income')}" class="btn btn-outline-success btn-sm me-2">Recettes</a>
-            <a href="{url_for('expense')}" class="btn btn-outline-danger btn-sm">Dépenses</a>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-
-    return render_page(body, "Tableau de bord")
-
-
-# -------------------------------------------------------------------
-# Recettes
-# -------------------------------------------------------------------
-@app.route("/income", methods=["GET", "POST"])
-def income():
-    if not session.get("user_id"):
-        return redirect(url_for("login"))
-
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
-    today = date.today()
-    year_month = today.strftime("%Y-%m")
-    school_year = get_school_year(today)
-
-    # 1) Récupération allocation existante (doc de référence)
-    alloc_q = (
-        db.collection(ALLOCATIONS_COLLECTION)
-        .where("userId", "==", user["id"])
-        .where("schoolYear", "==", school_year)
-        .limit(1)
-        .stream()
-    )
-    alloc_docs = list(alloc_q)
-    allocation_amount = 0.0
-
-    if alloc_docs:
-        allocation_amount = float(alloc_docs[0].to_dict().get("amount", 0.0))
-
-    # -------------------------------------------------------------------
-    # POST : Mise à jour allocation ou ajout recette ponctuelle
-    # -------------------------------------------------------------------
-    if request.method == "POST":
-        action = request.form.get("action")
-
-        # --- Mise à jour allocation mensuelle ---
-        if action == "set_allocation":
-            try:
-                new_amount = float(
-                    request.form.get("allocation_amount").replace(",", ".")
-                )
-            except Exception:
-                flash("Montant d’allocation invalide.", "error")
-                return redirect(url_for("income"))
-
-            has_existing = bool(alloc_docs)
-
-            # 1) Mettre à jour / créer le document d'allocation de référence
-            if has_existing:
-                alloc_docs[0].reference.update(
-                    {
-                        "amount": new_amount,
-                        "updatedAt": datetime.utcnow().isoformat(),
-                    }
-                )
-            else:
-                db.collection(ALLOCATIONS_COLLECTION).add(
-                    {
-                        "userId": user["id"],
-                        "cityId": user["cityId"],
-                        "amount": new_amount,
-                        "schoolYear": school_year,
-                        "createdAt": datetime.utcnow().isoformat(),
-                    }
-                )
-
-            # 2) Rejouer les allocations sur l'année scolaire
-            #    - Si c’est la première fois : tous les mois de l’année scolaire = nouveau montant
-            #    - Si c’est une modification : seulement à partir du mois courant, on met à jour/crée
-
-            start_year, end_year = map(int, school_year.split("-"))
-            months_schedule = (
-                [(start_year, m) for m in range(9, 13)]
-                + [(end_year, m) for m in range(1, 9)]
-            )
-
-            current_ym_int = today.year * 100 + today.month
-
-            for y, m in months_schedule:
-                ym_int = y * 100 + m
-                ym_str = f"{y:04d}-{m:02d}"
-                month_date = date(y, m, 1)
-
-                # Première définition : on applique à tous les mois.
-                # Modification : seulement aux mois >= mois courant.
-                if (not has_existing) or (ym_int >= current_ym_int):
-                    tx_q = (
-                        db.collection(TRANSACTIONS_COLLECTION)
-                        .where("userId", "==", user["id"])
-                        .where("cityId", "==", user["cityId"])
-                        .where("ttype", "==", "income")
-                        .where("source", "==", "allocation_mensuelle")
-                        .where("yearMonth", "==", ym_str)
-                        .where("schoolYear", "==", school_year)
-                        .limit(1)
-                        .stream()
-                    )
-                    tx_docs = list(tx_q)
-
-                    if tx_docs:
-                        # On met à jour le montant à partir du mois courant
-                        tx_docs[0].reference.update(
-                            {
-                                "amount": new_amount,
-                                "date": month_date.isoformat(),
-                                "schoolYear": school_year,
-                                "updatedAt": datetime.utcnow().isoformat(),
-                            }
-                        )
-                    else:
-                        # Aucune allocation pour ce mois → on la crée
-                        create_transaction(
-                            city_id=user["cityId"],
-                            user_id=user["id"],
-                            d=month_date,
-                            ttype="income",
-                            source="allocation_mensuelle",
-                            amount=new_amount,
-                            payment_method=None,
-                            is_advance=False,
-                            advance_status=None,
-                            description="Allocation mensuelle",
-                            category_id=None,
-                            category_name=None,
-                        )
-
-            flash(
-                "Allocation mensuelle mise à jour à partir de ce mois pour toute l’année scolaire.",
-                "success",
-            )
-            return redirect(url_for("income"))
-
-        # --- Recette ponctuelle ---
-        if action == "add_extra_income":
-            try:
-                amount = float(request.form.get("amount").replace(",", "."))
-            except Exception:
-                flash("Montant invalide.", "error")
-                return redirect(url_for("income"))
-
-            desc = request.form.get("description", "").strip() or "Recette ponctuelle"
-
-            create_transaction(
-                city_id=user["cityId"],
-                user_id=user["id"],
-                d=today,
-                ttype="income",
-                source="recette_ponctuelle",
-                amount=abs(amount),
-                payment_method=None,
-                is_advance=False,
-                advance_status=None,
-                description=desc,
-                category_id=None,
-                category_name=None,
-            )
-
-            flash("Recette ponctuelle ajoutée.", "success")
-            return redirect(url_for("income"))
-
-    # -------------------------------------------------------------------
-    # Récupération des recettes du mois (pour l'affichage)
-    # -------------------------------------------------------------------
-    q = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("cityId", "==", user["cityId"])
-        .where("userId", "==", user["id"])
-        .where("ttype", "==", "income")
-        .where("yearMonth", "==", year_month)
-        .order_by("date")
-    )
-    docs = q.stream()
-
-    month_incomes = []
-    total_income = 0.0
-    total_alloc = 0.0
-
-    for d in docs:
-        data = d.to_dict()
-        amount = float(data.get("amount", 0.0))
-        is_allocation = data.get("source") == "allocation_mensuelle"
-        total_income += amount
-        if is_allocation:
-            total_alloc += amount
-
-        month_incomes.append(
-            {
-                "date": data.get("date", ""),
-                "amount": amount,
-                "isAllocation": is_allocation,
-                "description": data.get("description", ""),
-            }
-        )
-
-    total_extra = total_income - total_alloc
-
-    # -------------------------------------------------------------------
-    # Interface HTML
-    # -------------------------------------------------------------------
-    rows_html = ""
-    for tr in month_incomes:
-        badge = (
-            '<span class="badge bg-success-subtle text-success border border-success-subtle">Allocation</span>'
-            if tr["isAllocation"]
-            else '<span class="badge bg-primary-subtle text-primary border border-primary-subtle">Ponctuelle</span>'
-        )
-        rows_html += f"""
-        <tr>
-            <td>{tr["date"]}</td>
-            <td>{badge}</td>
-            <td>{tr["description"]}</td>
-            <td class="text-end">{tr["amount"]:.2f} €</td>
-        </tr>
-        """
-
-    body = f"""
-    <h1 class="mb-4">Recettes</h1>
-
-    <div class="row g-4">
-      <!-- Allocation mensuelle -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-success text-white">
-            <h5 class="mb-0">Allocation mensuelle</h5>
-          </div>
-          <div class="card-body">
-
-            <p class="text-muted">
-              Année scolaire : <strong>{school_year}</strong><br>
-              Mois en cours : <strong>{year_month}</strong>
-            </p>
-
-            <form method="post">
-              <input type="hidden" name="action" value="set_allocation">
-
-              <div class="mb-3">
-                <label class="form-label">Montant mensuel actuel</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  class="form-control"
-                  name="allocation_amount"
-                  value="{allocation_amount:.2f}"
-                  required
-                >
-                <div class="form-text">
-                  La modification s’applique à partir de ce mois jusqu’à la fin de l’année scolaire.
-                </div>
-              </div>
-
-            <div class="d-grid">
-                <button class="btn btn-success">Mettre à jour</button>
-              </div>
-            </form>
-
-          </div>
-        </div>
-      </div>
-
-      <!-- Recette ponctuelle -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-primary text-white">
-            <h5 class="mb-0">Recette ponctuelle</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <input type="hidden" name="action" value="add_extra_income">
-
-              <div class="mb-3">
-                <label class="form-label">Montant</label>
-                <input type="number" step="0.01" min="0" name="amount" class="form-control" required>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Description</label>
-                <input type="text" name="description" class="form-control" placeholder="Ex : don, remboursement...">
-              </div>
-
-              <div class="d-grid">
-                <button class="btn btn-primary">Ajouter la recette</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <hr class="my-4">
-
-    <div class="row g-4 mb-3">
-      <div class="col-lg-5">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-3">Résumé du mois {year_month}</h5>
-            <p class="mb-1">Total des recettes : <strong>{total_income:.2f} €</strong></p>
-            <p class="mb-1">Dont allocations : <strong>{total_alloc:.2f} €</strong></p>
-            <p class="mb-0">Recettes ponctuelles : <strong>{total_extra:.2f} €</strong></p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <h2 class="h5 mb-3">Détail des recettes du mois {year_month}</h2>
-
-    <div class="table-responsive">
-      <table class="table table-sm align-middle">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Type</th>
-            <th>Description</th>
-            <th class="text-end">Montant</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows_html}
-        </tbody>
-      </table>
-    </div>
-    """
-
-    return render_page(body, "Recettes")
-
-
-
-
-# -------------------------------------------------------------------
-# Dépenses (avec catégories)
-# -------------------------------------------------------------------
-
-@app.route("/expense", methods=["GET", "POST"])
-def expense():
-    if not session.get("user_id"):
-        return redirect(url_for("login"))
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
-    today = date.today()
-    categories = get_active_expense_categories()
-
-    if request.method == "POST":
-        form_type = request.form.get("form_type")
-        desc = request.form.get("description", "").strip() or "Dépense"
-        category_id = request.form.get("category_id") or None
-        category_name = None
-
-        if category_id:
-            cat_doc = db.collection(EXPENSE_CATEGORIES_COLLECTION).document(category_id).get()
-            if cat_doc.exists:
-                category_name = cat_doc.to_dict().get("name")
-
-        try:
-            amount = float(request.form.get("amount").replace(",", "."))
-        except Exception:
-            flash("Montant invalide.", "error")
-            return redirect(url_for("expense"))
-
-        if amount <= 0:
-            flash("Le montant doit être positif.", "error")
-            return redirect(url_for("expense"))
-
-        # Toujours stocké comme montant négatif (dépense)
-        amount = -abs(amount)
-
-        if form_type == "cb_ville":
-            create_transaction(
-                city_id=user["cityId"],
-                user_id=user["id"],
-                d=today,
-                ttype="expense",
-                source="depense_carte_ville",
-                amount=amount,
-                payment_method="carte_ville",
-                is_advance=False,
-                advance_status=None,
-                description=desc,
-                category_id=category_id,
-                category_name=category_name,
-            )
-            flash("Dépense CB maison enregistrée.", "success")
-
-        elif form_type == "avance":
-            payment_method = request.form.get("payment_method")
-            create_transaction(
-                city_id=user["cityId"],
-                user_id=user["id"],
-                d=today,
-                ttype="expense",
-                source="avance_frais_personnelle",
-                amount=amount,
-                payment_method=payment_method,
-                is_advance=True,
-                advance_status="en_attente",
-                description=desc,
-                category_id=category_id,
-                category_name=category_name,
-            )
-            flash("Avance de frais enregistrée.", "success")
-
-        return redirect(url_for("expense"))
-
-    # Options de catégories pour le HTML
-    category_options = ""
-    for c in categories:
-        category_options += f'<option value="{c["id"]}">{c["name"]}</option>'
-
-    body = f"""
-    <h1 class="mb-4">Dépenses</h1>
-
-    <div class="row g-4">
-      <!-- Dépense CB maison -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-danger text-white">
-            <h5 class="mb-0">Dépense CB de la maison</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <input type="hidden" name="form_type" value="cb_ville">
-
-              <div class="mb-3">
-                <label class="form-label">Montant (€)</label>
-                <input type="text" name="amount" class="form-control" required>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Catégorie</label>
-                <select name="category_id" class="form-select" required>
-                  <option value="">-- choisir --</option>
-                  {category_options}
-                </select>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Description</label>
-                <input type="text" name="description" class="form-control" placeholder="Ex : courses, plein, etc.">
-              </div>
-
-              <div class="d-grid">
-                <button type="submit" class="btn btn-danger">Enregistrer la dépense</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <!-- Avance de frais -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-warning text-dark">
-            <h5 class="mb-0">Avance de frais</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <input type="hidden" name="form_type" value="avance">
-
-              <div class="mb-3">
-                <label class="form-label">Montant (€)</label>
-                <input type="text" name="amount" class="form-control" required>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Catégorie</label>
-                <select name="category_id" class="form-select" required>
-                  <option value="">-- choisir --</option>
-                  {category_options}
-                </select>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Moyen de paiement</label>
-                <select name="payment_method" class="form-select">
-                  <option value="cb_perso">CB personnelle</option>
-                  <option value="cheque">Chèque</option>
-                  <option value="especes">Espèces</option>
-                </select>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Description</label>
-                <input type="text" name="description" class="form-control" placeholder="Ex : avance sur courses">
-              </div>
-
-              <div class="d-grid">
-                <button type="submit" class="btn btn-warning">Enregistrer l'avance</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <p class="mt-3 text-muted small">
-      Les catégories de dépenses sont définies par l'administrateur.
-    </p>
-    """
-    return render_page(body, "Dépenses")
-
-
-# -------------------------------------------------------------------
-# Mes opérations (historique personnel) + annulation dernière opération
-# -------------------------------------------------------------------
-
-@app.route("/my-operations")
-def my_operations():
-    if not session.get("user_id"):
-        return redirect(url_for("login"))
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
-    today = date.today()
-
-    year_param = request.args.get("year")
-    month_param = request.args.get("month")
-
+    st.session_state['logged_in'] = False
+    st.session_state['user_data'] = {}
+    st.session_state['role'] = None
+    st.rerun()
+
+# --- Transactions & Calculs ---
+def save_transaction(house_id, user_id, type, amount, nature, payment_method=None, notes=None):
     try:
-        if year_param and month_param:
-            year = int(year_param)
-            month = int(month_param)
-            selected_date = date(year, month, 1)
-        else:
-            selected_date = today
-    except ValueError:
-        selected_date = today
-
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    tx_query = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("userId", "==", user["id"])
-        .where("yearMonth", "==", year_month)
-        .order_by("date")
-    )
-
-    try:
-        tx_docs = list(tx_query.stream())
-    except Exception:
-        flash(
-            "Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.",
-            "error",
-        )
-        tx_docs = []
-
-    rows_html = ""
-    total = 0.0
-    last_cancellable_tx_id = None
-
-    for doc in tx_docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        amount = float(t.get("amount", 0.0))
-        total += amount
-
-        ttype = t.get("type")
-        if ttype == "income":
-            type_label = "Recette"
-        elif ttype == "expense":
-            type_label = "Dépense"
-        else:
-            type_label = ttype or ""
-
-        source = t.get("source") or ""
-        if source == "allocation_mensuelle":
-            source_label = "Allocation mensuelle"
-        elif source == "recette_ponctuelle":
-            source_label = "Recette ponctuelle"
-        elif source == "depense_carte_ville":
-            source_label = "Dépense CB maison"
-        elif source == "avance_frais_personnelle":
-            source_label = "Avance de frais"
-        else:
-            source_label = source
-
-        # On autorise l'annulation pour toutes les opérations sauf allocation
-        if source != "allocation_mensuelle":
-            last_cancellable_tx_id = tx_id
-
-        category_name = t.get("categoryName") or ""
-        payment_method = t.get("paymentMethod") or ""
-        desc = t.get("description") or ""
-        advance_status = t.get("advanceStatus") or ""
-
-        rows_html += f"""
-          <tr>
-            <td>{t.get('date')}</td>
-            <td>{type_label}</td>
-            <td>{source_label}</td>
-            <td>{category_name}</td>
-            <td>{payment_method}</td>
-            <td class="text-end">{amount:.2f} €</td>
-            <td>{desc}</td>
-            <td>{advance_status}</td>
-          </tr>
-        """
-
-    selected_year = selected_date.year
-    selected_month = selected_date.month
-
-    cancel_block = ""
-    if last_cancellable_tx_id:
-        cancel_url = url_for("cancel_last_operation")
-        cancel_block = f"""
-          <form method="post" action="{cancel_url}" class="mt-3">
-            <input type="hidden" name="year" value="{selected_year}">
-            <input type="hidden" name="month" value="{selected_month}">
-            <button
-              type="submit"
-              class="btn btn-outline-danger btn-sm"
-              onclick="return confirm('Annuler définitivement ma dernière opération ?');"
-            >
-              Annuler ma dernière opération
-            </button>
-          </form>
-        """
-
-    if not rows_html:
-        rows_html = "<tr><td colspan='8' class='text-center text-muted'>Aucune opération pour ce mois.</td></tr>"
-
-    body = f"""
-    <h1 class="mb-4">Mes opérations</h1>
-
-    <div class="row g-4 mb-3">
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-2">Période affichée</h5>
-            <p class="mb-1">Année scolaire : <strong>{school_year}</strong></p>
-            <p class="mb-0">Mois : <strong>{year_month}</strong></p>
-          </div>
-        </div>
-      </div>
-
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <form method="get" class="row g-2 align-items-end">
-              <div class="col-4">
-                <label class="form-label mb-1">Année</label>
-                <input type="number" name="year" value="{selected_year}" min="2000" max="2100" class="form-control" required>
-              </div>
-              <div class="col-4">
-                <label class="form-label mb-1">Mois</label>
-                <input type="number" name="month" value="{selected_month}" min="1" max="12" class="form-control" required>
-              </div>
-              <div class="col-4 d-grid">
-                <button type="submit" class="btn btn-primary">Afficher</button>
-              </div>
-            </form>
-            {cancel_block}
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card shadow-sm border-0 mb-3">
-      <div class="card-body">
-        <h5 class="card-title mb-2">Total du mois</h5>
-        <p class="mb-0">
-          <strong>{total:.2f} €</strong>
-        </p>
-        <p class="text-muted mb-0">
-          Les recettes apparaissent en positif, les dépenses en négatif.
-        </p>
-      </div>
-    </div>
-
-    <div class="card shadow-sm border-0">
-      <div class="card-header bg-light">
-        <h5 class="mb-0">Opérations pour {year_month}</h5>
-      </div>
-      <div class="card-body p-0">
-        <div class="table-responsive">
-          <table class="table table-sm mb-0 align-middle">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Source</th>
-                <th>Catégorie</th>
-                <th>Moyen de paiement</th>
-                <th class="text-end">Montant (€)</th>
-                <th>Description</th>
-                <th>Statut avance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows_html}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    """
-    return render_page(body, "Mes opérations")
-
-
-@app.route("/my-operations/cancel-last", methods=["POST"])
-def cancel_last_operation():
-    if not session.get("user_id"):
-        return redirect(url_for("login"))
-    user = current_user()
-    if not user:
-        return redirect(url_for("login"))
-
-    year_str = request.form.get("year")
-    month_str = request.form.get("month")
-
-    try:
-        year = int(year_str)
-        month = int(month_str)
-        selected_date = date(year, month, 1)
-    except Exception:
-        flash("Paramètres de date invalides.", "error")
-        return redirect(url_for("my_operations"))
-
-    year_month = get_year_month(selected_date)
-
-    tx_query = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("userId", "==", user["id"])
-        .where("yearMonth", "==", year_month)
-        .order_by("date")
-    )
-
-    try:
-        tx_docs = list(tx_query.stream())
-    except Exception:
-        flash(
-            "Firestore demande peut-être un index pour cette requête. Consulte la console Firebase si besoin.",
-            "error",
-        )
-        return redirect(url_for("my_operations", year=year, month=month))
-
-    last_cancellable_doc = None
-    for doc in tx_docs:
-        t = doc.to_dict()
-        source = t.get("source") or ""
-        if source != "allocation_mensuelle":
-            last_cancellable_doc = doc
-
-    if not last_cancellable_doc:
-        flash("Aucune opération annulable pour ce mois (hors allocation mensuelle).", "error")
-        return redirect(url_for("my_operations", year=year, month=month))
-
-    tx_id = last_cancellable_doc.id
-    last_data = last_cancellable_doc.to_dict()
-    amount = float(last_data.get("amount", 0.0))
-    desc = last_data.get("description") or ""
-    source = last_data.get("source") or ""
-
-    db.collection(TRANSACTIONS_COLLECTION).document(tx_id).delete()
-
-    flash(
-        f"Dernière opération annulée (source={source}, montant={amount:.2f} €, description='{desc}').",
-        "success",
-    )
-    return redirect(url_for("my_operations", year=year, month=month))
-
-
-# -------------------------------------------------------------------
-# Interface chef : Avances
-# -------------------------------------------------------------------
-@app.route("/chef/advances/<tx_id>/mark-reimbursed")
-def chef_mark_reimbursed(tx_id):
-    require_login()
-    require_chef_or_admin()
-
-    ref = db.collection(TRANSACTIONS_COLLECTION).document(tx_id)
-    snap = ref.get()
-    if not snap.exists:
-        abort(404)
-
-    ref.update(
-        {
-            "advanceStatus": "rembourse",
-            "updatedAt": utc_now_iso(),
+        data = {
+            'house_id': house_id, 'user_id': user_id, 'type': type,
+            'amount': round(float(amount), 2), 'nature': nature,
+            'payment_method': payment_method, 'created_at': datetime.now().isoformat(),
+            'status': 'validé' if type != 'depense_avance' else 'en_attente_remboursement', 
+            'month_year': datetime.now().strftime('%Y-%m') 
         }
-    )
-    flash("Avance marquée remboursée.", "success")
-    return redirect(url_for("chef_advances"))
+        db.collection(COL_TRANSACTIONS).add(data)
+        st.toast("Enregistré !", icon='✅')
+        get_house_transactions.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erreur: {e}")
+        return False
 
-@app.route("/chef/advances")
-def chef_advances():
-    require_login()
-    require_chef_or_admin()
-    user = current_user()
+@st.cache_data(ttl=60)
+def get_house_transactions(house_id):
+    try:
+        query = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
+        return pd.DataFrame([d.to_dict() | {'doc_id': d.id} for d in query])
+    except: return pd.DataFrame()
 
-    docs = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("cityId", "==", user["cityId"])
-        .where("isAdvance", "==", True)
-        .order_by("date")
-        .stream()
-    )
+@st.cache_data
+def get_all_houses():
+    try:
+        docs = db.collection(COL_HOUSES).stream()
+        return {doc.id: doc.to_dict() for doc in docs}
+    except: return {}
 
-    rows = ""
-    for doc in docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        u = get_user_by_id(t.get("userId"))
-        uname = u["fullName"] if u else "?"
-        amount = float(t.get("amount", 0.0))
-        amount_abs = abs(amount)
-        pay = t.get("paymentMethod") or ""
-        desc = t.get("description") or ""
-        status = t.get("advanceStatus") or ""
+@st.cache_data
+def get_house_name(house_id):
+    try:
+        doc = db.collection(COL_HOUSES).document(house_id).get()
+        return doc.to_dict().get('name', 'Inconnue') if doc.exists else 'Inconnue'
+    except: return 'Inconnue'
 
-        if status == "en_attente":
-            status_badge = '<span class="badge bg-warning text-dark">En attente</span>'
-        elif status == "rembourse":
-            status_badge = '<span class="badge bg-success">Remboursée</span>'
+def calculate_balances(df, uid):
+    recettes = df[df['type'].str.contains('recette')]['amount'].sum()
+    depenses_maison = df[df['payment_method'] == 'CB Maison']['amount'].sum()
+    house_bal = round(recettes - depenses_maison, 2)
+    
+    avances = df[(df['user_id'] == uid) & (df['type'] == 'depense_avance')]['amount'].sum()
+    remb = df[(df['user_id'] == uid) & (df['type'] == 'depense_avance') & (df['status'] == 'remboursé')]['amount'].sum()
+    perso_bal = round(avances - remb, 2)
+    return house_bal, perso_bal
+
+def set_monthly_allocation(user_id, house_id, amount):
+    amount = round(float(amount), 2)
+    db.collection(COL_ALLOCATIONS).document(user_id).set({'amount': amount, 'updated': datetime.now().isoformat()})
+    
+    current_month = datetime.now().strftime('%Y-%m')
+    q = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).where('month_year', '==', current_month).where('type', '==', 'recette_mensuelle').limit(1).stream()
+    ex = next(q, None)
+    
+    u_name = st.session_state['user_data'].get('first_name', 'User')
+    if ex:
+        db.collection(COL_TRANSACTIONS).document(ex.id).update({'amount': amount})
+    else:
+        save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Alloc {u_name}")
+    st.rerun()
+
+def delete_transaction(doc_id):
+    try:
+        db.collection(COL_TRANSACTIONS).document(doc_id).delete()
+        st.toast("Supprimé !", icon='🗑️')
+        get_house_transactions.clear()
+        st.rerun()
+    except Exception as e: st.error(str(e))
+
+# --- Suppression ---
+
+def delete_user(user_id):
+    """Supprime un utilisateur de la collection COL_USERS."""
+    try:
+        doc_ref = db.collection(COL_USERS).document(user_id)
+        if doc_ref.get().exists:
+            doc_ref.delete()
+            st.toast(f"Utilisateur {user_id} supprimé !", icon='🗑️')
+            get_all_users.clear() # Invalide le cache des utilisateurs
+            return True
         else:
-            status_badge = status
+            st.error(f"Utilisateur {user_id} introuvable.")
+            return False
+    except Exception as e:
+        st.error(f"Erreur suppression utilisateur: {e}")
+        return False
 
-        action = ""
-        if status != "rembourse":
-            action = f'<a href="{url_for("chef_mark_reimbursed", tx_id=tx_id)}" class="btn btn-sm btn-outline-success">Marquer remboursée</a>'
-
-        rows += f"""
-          <tr>
-            <td>{t.get('date')}</td>
-            <td>{uname}</td>
-            <td class="text-end">{amount_abs:.2f} €</td>
-            <td>{pay}</td>
-            <td>{desc}</td>
-            <td>{status_badge}</td>
-            <td class="text-end">{action}</td>
-          </tr>
-        """
-
-    no_rows_html = "<tr><td colspan='7' class='text-center text-muted'>Aucune avance de frais pour cette ville.</td></tr>"
-    tbody_rows = rows or no_rows_html
-
-    body = f"""
-    <h1 class="mb-4">Avances de frais – {user['cityId'].capitalize()}</h1>
-
-    <div class="card shadow-sm border-0">
-      <div class="card-body">
-        <p class="mb-0 text-muted">
-          Liste de toutes les avances de frais des utilisateurs de la maison.<br>
-          Vous pouvez marquer une avance comme remboursée lorsqu'elle a été régularisée.
-        </p>
-      </div>
-    </div>
-
-    <div class="card shadow-sm border-0 mt-3">
-      <div class="card-header bg-light">
-        <h5 class="mb-0">Avances enregistrées</h5>
-      </div>
-      <div class="card-body p-0">
-        <div class="table-responsive">
-          <table class="table table-sm mb-0 align-middle">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Utilisateur</th>
-                <th class="text-end">Montant</th>
-                <th>Moyen</th>
-                <th>Description</th>
-                <th>Statut</th>
-                <th class="text-end">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tbody_rows}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+def delete_house(house_id):
     """
-    return render_page(body, "Avances de frais")
-
-# -------------------------------------------------------------------
-# Chef / Admin : Export CSV (ville simple – année scolaire courante)
-# -------------------------------------------------------------------
-
-@app.route("/chef/export")
-def chef_export():
-    require_login()
-    require_chef_or_admin()
-    user = current_user()
-
-    today = date.today()
-    school_year = get_school_year_for_date(today)
-
-    docs = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("cityId", "==", user["cityId"])
-        .where("schoolYear", "==", school_year)
-        .stream()
-    )
-
-    output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(
-        ["id", "date", "yearMonth", "type", "source", "amount",
-         "paymentMethod", "categoryName", "description", "userFullName",
-         "isAdvance", "advanceStatus"]
-    )
-
-    for doc in docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        u = get_user_by_id(t.get("userId"))
-        uname = u["fullName"] if u else ""
-        writer.writerow([
-            tx_id,
-            t.get("date"),
-            t.get("yearMonth"),
-            t.get("type"),
-            t.get("source"),
-            t.get("amount"),
-            t.get("paymentMethod"),
-            t.get("categoryName"),
-            t.get("description"),
-            uname,
-            t.get("isAdvance"),
-            t.get("advanceStatus"),
-        ])
-
-    csv_content = output.getvalue()
-    output.close()
-
-    filename = f"compta_{user['cityId']}_{school_year}.csv"
-
-    return Response(
-        csv_content,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-# -------------------------------------------------------------------
-# Chef : Compta maison (vue filtrée + export)
-# -------------------------------------------------------------------
-
-@app.route("/chef/compta", methods=["GET"])
-def chef_city_transactions():
-    require_login()
-    require_chef_or_admin()
-    user = current_user()
-    today = date.today()
-
-    mode = request.args.get("mode", "month")
-    year_str = request.args.get("year")
-    month_str = request.args.get("month")
-
-    if year_str:
-        try:
-            year = int(year_str)
-        except ValueError:
-            year = today.year
-    else:
-        year = today.year
-
-    if month_str:
-        try:
-            month = int(month_str)
-        except ValueError:
-            month = today.month
-    else:
-        month = today.month
-
-    selected_date = date(year, max(1, min(12, month)), 1)
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", user["cityId"])
-
-    if mode == "schoolyear":
-        q = q.where("schoolYear", "==", school_year)
-        subtitle = f"Année scolaire {school_year}"
-    else:
-        q = q.where("yearMonth", "==", year_month)
-        subtitle = f"Mois {year_month}"
-
-    q = q.order_by("date")
-
-    try:
-        docs = list(q.stream())
-    except Exception:
-        flash("Firestore demande peut-être un index pour cette requête (chef_city_transactions).", "error")
-        docs = []
-
-    rows = ""
-    total = 0.0
-    count = 0
-
-    for doc in docs:
-        t = doc.to_dict()
-        amount = float(t.get("amount", 0.0))
-        total += amount
-        count += 1
-
-        u = get_user_by_id(t.get("userId")) if t.get("userId") else None
-        uname = u["fullName"] if u else ""
-
-        ttype = t.get("type") or ""
-        source = t.get("source") or ""
-        pay = t.get("paymentMethod") or ""
-        desc = t.get("description") or ""
-        adv_status = t.get("advanceStatus") or ""
-        cat_name = t.get("categoryName") or ""
-        date_str = t.get("date") or ""
-
-        rows += f"""
-          <tr>
-            <td>{date_str}</td>
-            <td>{ttype}</td>
-            <td>{source}</td>
-            <td>{cat_name}</td>
-            <td>{pay}</td>
-            <td class="text-end">{amount:.2f} €</td>
-            <td>{uname}</td>
-            <td>{adv_status}</td>
-            <td>{desc}</td>
-          </tr>
-        """
-
-    no_rows_html = "<tr><td colspan='9' class='text-center text-muted'>Aucune opération pour ce filtre.</td></tr>"
-    tbody_rows = rows or no_rows_html
-
-    export_url = url_for(
-        "chef_city_transactions_export",
-        mode=mode,
-        year=year,
-        month=month,
-    )
-
-    body = f"""
-    <h1 class="mb-4">Compta maison – {user['cityId'].capitalize()}</h1>
-
-    <div class="row g-4 mb-3">
-      <div class="col-lg-7">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-3">Filtre</h5>
-            <form method="get" class="row g-2 align-items-end">
-              <div class="col-12 mb-2">
-                <div class="form-check form-check-inline">
-                  <input class="form-check-input" type="radio" name="mode" value="month" {'checked' if mode == 'month' else ''}>
-                  <label class="form-check-label">Mois</label>
-                </div>
-                <div class="form-check form-check-inline">
-                  <input class="form-check-input" type="radio" name="mode" value="schoolyear" {'checked' if mode == 'schoolyear' else ''}>
-                  <label class="form-check-label">Année scolaire</label>
-                </div>
-              </div>
-              <div class="col-4">
-                <label class="form-label mb-1">Année</label>
-                <input type="number" name="year" value="{year}" min="2000" max="2100" class="form-control" required>
-              </div>
-              <div class="col-4">
-                <label class="form-label mb-1">Mois</label>
-                <input type="number" name="month" value="{month}" min="1" max="12" class="form-control">
-              </div>
-              <div class="col-4 d-grid">
-                <button type="submit" class="btn btn-primary">Afficher</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <div class="col-lg-5">
-        <div class="card shadow-sm border-0">
-          <div class="card-body">
-            <h5 class="card-title mb-2">Résumé</h5>
-            <p class="mb-1"><strong>Filtre :</strong> {subtitle}</p>
-            <p class="mb-1"><strong>Ville :</strong> {user['cityId'].capitalize()}</p>
-            <p class="mb-1"><strong>Nombre d'opérations :</strong> {count}</p>
-            <p class="mb-0"><strong>Total :</strong> {total:.2f} €</p>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="mb-3">
-      <a href="{export_url}" class="btn btn-outline-secondary btn-sm">
-        📥 Exporter en CSV (mêmes filtres)
-      </a>
-    </div>
-
-    <div class="card shadow-sm border-0">
-      <div class="card-header bg-light">
-        <h5 class="mb-0">Opérations – {subtitle}</h5>
-      </div>
-      <div class="card-body p-0">
-        <div class="table-responsive">
-          <table class="table table-sm mb-0 align-middle">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Source</th>
-                <th>Catégorie</th>
-                <th>Moyen</th>
-                <th class="text-end">Montant (€)</th>
-                <th>Utilisateur</th>
-                <th>Statut avance</th>
-                <th>Description</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tbody_rows}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+    Supprime une maison de la collection COL_HOUSES.
+    ⚠️ Avertissement: Les transactions associées ne sont PAS supprimées par cette fonction.
     """
-    return render_page(body, "Compta maison")
-
-
-@app.route("/chef/compta/export")
-def chef_city_transactions_export():
-    require_login()
-    require_chef_or_admin()
-    user = current_user()
-    today = date.today()
-
-    mode = request.args.get("mode", "month")
-    year_str = request.args.get("year")
-    month_str = request.args.get("month")
-
-    if year_str:
-        try:
-            year = int(year_str)
-        except ValueError:
-            year = today.year
-    else:
-        year = today.year
-
-    if month_str:
-        try:
-            month = int(month_str)
-        except ValueError:
-            month = today.month
-    else:
-        month = today.month
-
-    selected_date = date(year, max(1, min(12, month)), 1)
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    q = db.collection(TRANSACTIONS_COLLECTION).where("cityId", "==", user["cityId"])
-
-    if mode == "schoolyear":
-        q = q.where("schoolYear", "==", school_year)
-        filename = f"chef_compta_{user['cityId']}_{school_year}.csv"
-    else:
-        q = q.where("yearMonth", "==", year_month)
-        filename = f"chef_compta_{user['cityId']}_{year_month}.csv"
-
-    q = q.order_by("date")
-
     try:
-        docs = list(q.stream())
-    except Exception:
-        flash("Firestore demande peut-être un index pour l'export (chef_city_transactions_export).", "error")
-        return redirect(url_for("chef_city_transactions", mode=mode, year=year, month=month))
-
-    output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(
-        [
-            "date",
-            "yearMonth",
-            "schoolYear",
-            "type",
-            "source",
-            "amount",
-            "paymentMethod",
-            "categoryName",
-            "description",
-            "userFullName",
-            "isAdvance",
-            "advanceStatus",
-        ]
-    )
-
-    for doc in docs:
-        t = doc.to_dict()
-        u = get_user_by_id(t.get("userId"))
-        uname = u["fullName"] if u else ""
-        writer.writerow(
-            [
-                t.get("date"),
-                t.get("yearMonth"),
-                t.get("schoolYear"),
-                t.get("type"),
-                t.get("source"),
-                t.get("amount"),
-                t.get("paymentMethod"),
-                t.get("categoryName"),
-                t.get("description"),
-                uname,
-                t.get("isAdvance"),
-                t.get("advanceStatus"),
-            ]
-        )
-
-    csv_content = output.getvalue()
-    output.close()
-
-    return Response(
-        csv_content,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-# -------------------------------------------------------------------
-# Tableau de bord admin (simple) + accès reset année
-# -------------------------------------------------------------------
-
-@app.route("/admin/")
-def admin_dashboard():
-    require_login()
-    require_admin()
-
-    today = date.today()
-    school_year = get_school_year_for_date(today)
-
-    body = f"""
-    <h1 class="mb-4">Administration</h1>
-
-    <div class="row g-4">
-
-      <!-- Bloc navigation admin -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-primary text-white">
-            <h5 class="mb-0">Gestion des utilisateurs et des catégories</h5>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">
-              Accès rapide aux principales fonctions d'administration.
-            </p>
-            <div class="d-grid gap-2">
-              <a href="{url_for("admin_users")}" class="btn btn-outline-primary">
-                👤 Admin utilisateurs
-              </a>
-              <a href="{url_for("admin_categories")}" class="btn btn-outline-secondary">
-                🗂️ Catégories de dépenses
-              </a>
-              <a href="{url_for("admin_transactions")}" class="btn btn-outline-dark">
-                📊 Admin compta (toutes opérations)
-              </a>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Bloc reset année scolaire -->
-      <div class="col-lg-6">
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-danger text-white">
-            <h5 class="mb-0">Gestion des données</h5>
-          </div>
-          <div class="card-body">
-            <h6 class="mb-3">Réinitialiser l'année en cours</h6>
-            <p class="text-danger fw-bold">
-              Cette action supprime toutes les recettes, toutes les dépenses
-              et toutes les allocations de l'année scolaire {school_year}
-              pour toutes les villes et tous les utilisateurs.
-              Elle est <u>irréversible</u>.
-            </p>
-
-            <form method="post" action="{url_for("admin_reset_year")}">
-              <div class="mb-3">
-                <label class="form-label">
-                  Confirmer avec votre mot de passe admin :
-                </label>
-                <input
-                  type="password"
-                  name="admin_password"
-                  class="form-control"
-                  placeholder="Mot de passe admin"
-                  required
-                >
-              </div>
-              <div class="d-grid">
-                <button
-                  type="submit"
-                  class="btn btn-danger"
-                  onclick="return confirm('Confirmer la réinitialisation complète de l\\'année scolaire {school_year} ? Cette action est définitive.');"
-                >
-                  🔁 Réinitialiser l'année en cours
-                </button>
-              </div>
-            </form>
-
-          </div>
-        </div>
-      </div>
-
-    </div>
-    """
-
-    return render_page(body, "Administration")
-
-
-# -------------------------------------------------------------------
-# Admin : Réinitialiser l'année scolaire en cours
-# -------------------------------------------------------------------
-
-@app.route("/admin/reset-year", methods=["POST"])
-def admin_reset_year():
-    require_login()
-    require_admin()
-
-    user = current_user()
-
-    # Mot de passe saisi dans le formulaire
-    admin_password = request.form.get("admin_password", "").strip()
-
-    if not admin_password:
-        flash("Mot de passe admin requis.", "error")
-        return redirect(url_for("admin_dashboard"))
-
-    from werkzeug.security import check_password_hash
-
-    password_hash = user.get("passwordHash")
-    if not password_hash or not check_password_hash(password_hash, admin_password):
-        flash("Mot de passe admin incorrect.", "error")
-        return redirect(url_for("admin_dashboard"))
-
-    # Année scolaire à réinitialiser
-    today = date.today()
-    school_year = get_school_year_for_date(today)
-
-    # 1) Suppression de TOUTES les transactions de l'année scolaire
-    tx_query = (
-        db.collection(TRANSACTIONS_COLLECTION)
-        .where("schoolYear", "==", school_year)
-        .stream()
-    )
-    for doc in tx_query:
-        doc.reference.delete()
-
-    # 2) Suppression de TOUTES les allocations de l'année scolaire
-    alloc_query = (
-        db.collection(ALLOCATIONS_COLLECTION)
-        .where("schoolYear", "==", school_year)
-        .stream()
-    )
-    for doc in alloc_query:
-        doc.reference.delete()
-
-    flash(
-        f"Année scolaire {school_year} réinitialisée : toutes les recettes, dépenses et allocations ont été supprimées.",
-        "success",
-    )
-    return redirect(url_for("admin_dashboard"))
-
-
-# -------------------------------------------------------------------
-# Admin : Compta (voir / annuler / exporter opérations)
-# -------------------------------------------------------------------
-
-@app.route("/admin/transactions", methods=["GET"])
-def admin_transactions():
-    require_login()
-    require_admin()
-    today = date.today()
-
-    city = request.args.get("city", "all")
-    mode = request.args.get("mode", "month")
-    year_str = request.args.get("year")
-    month_str = request.args.get("month")
-
-    if year_str:
-        try:
-            year = int(year_str)
-        except ValueError:
-            year = today.year
-    else:
-        year = today.year
-
-    if month_str:
-        try:
-            month = int(month_str)
-        except ValueError:
-            month = today.month
-    else:
-        month = today.month
-
-    selected_date = date(year, max(1, min(12, month)), 1)
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    q = db.collection(TRANSACTIONS_COLLECTION)
-
-    if city != "all":
-        q = q.where("cityId", "==", city)
-
-    if mode == "schoolyear":
-        q = q.where("schoolYear", "==", school_year)
-        subtitle = f"Année scolaire {school_year}"
-    else:
-        q = q.where("yearMonth", "==", year_month)
-        subtitle = f"Mois {year_month}"
-
-    q = q.order_by("date")
-
-    try:
-        docs = list(q.stream())
-    except Exception:
-        flash("Firestore demande peut-être un index pour cette requête (admin_transactions). Consulte la console Firebase si besoin.", "error")
-        docs = []
-
-    rows = ""
-    total = 0.0
-    count = 0
-
-    for doc in docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        amount = float(t.get("amount", 0.0))
-        total += amount
-        count += 1
-
-        u = get_user_by_id(t.get("userId")) if t.get("userId") else None
-        uname = u["fullName"] if u else ""
-
-        city_label = t.get("cityId") or ""
-        ttype = t.get("type") or ""
-        source = t.get("source") or ""
-        pay = t.get("paymentMethod") or ""
-        desc = t.get("description") or ""
-        adv_status = t.get("advanceStatus") or ""
-        cat_name = t.get("categoryName") or ""
-
-        delete_url = url_for(
-            "admin_delete_transaction",
-            tx_id=tx_id,
-            city=city,
-            mode=mode,
-            year=year,
-            month=month,
-        )
-
-        rows += f"""
-          <tr>
-            <td>{tx_id}</td>
-            <td>{city_label}</td>
-            <td>{t.get('date')}</td>
-            <td>{ttype}</td>
-            <td>{source}</td>
-            <td>{cat_name}</td>
-            <td>{pay}</td>
-            <td>{amount:.2f}</td>
-            <td>{uname}</td>
-            <td>{adv_status}</td>
-            <td>{desc}</td>
-            <td>
-              <a href="{delete_url}"
-                 class="btn btn-sm btn-outline-danger"
-                 onclick="return confirm('Supprimer définitivement cette opération ?');">
-                 Annuler
-              </a>
-            </td>
-          </tr>
-        """
-
-    export_url = url_for(
-        "admin_transactions_export",
-        city=city,
-        mode=mode,
-        year=year,
-        month=month,
-    )
-
-    body = f"""
-      <h1 class="mb-4">Admin compta – toutes opérations</h1>
-
-      <form method="get" class="row g-3 mb-3 align-items-end">
-        <div class="col-md-3">
-          <label class="form-label">Ville</label>
-          <select name="city" class="form-select">
-            <option value="all" {"selected" if city == "all" else ""}>Toutes</option>
-            <option value="strasbourg" {"selected" if city == "strasbourg" else ""}>Strasbourg</option>
-            <option value="colmar" {"selected" if city == "colmar" else ""}>Colmar</option>
-          </select>
-        </div>
-
-        <div class="col-md-3">
-          <label class="form-label">Mode</label><br>
-          <div class="form-check form-check-inline">
-            <input class="form-check-input" type="radio" name="mode" value="month" {"checked" if mode == "month" else ""}>
-            <label class="form-check-label">Mois</label>
-          </div>
-          <div class="form-check form-check-inline">
-            <input class="form-check-input" type="radio" name="mode" value="schoolyear" {"checked" if mode == "schoolyear" else ""}>
-            <label class="form-check-label">Année scolaire</label>
-          </div>
-        </div>
-
-        <div class="col-md-2">
-          <label class="form-label">Année</label>
-          <input type="number" name="year" class="form-control" value="{year}" min="2000" max="2100" required>
-        </div>
-
-        <div class="col-md-2">
-          <label class="form-label">Mois</label>
-          <input type="number" name="month" class="form-control" value="{month}" min="1" max="12">
-        </div>
-
-        <div class="col-md-2">
-          <button type="submit" class="btn btn-primary w-100">Afficher</button>
-        </div>
-      </form>
-
-      <div class="mb-3">
-        <p class="mb-1"><strong>Filtre :</strong> {subtitle} – Ville : {"toutes" if city == "all" else city}</p>
-        <p class="mb-1"><strong>Nombre d'opérations :</strong> {count}</p>
-        <p class="mb-1"><strong>Total :</strong> {total:.2f} €</p>
-      </div>
-
-      <p>
-        <a href="{export_url}" class="btn btn-outline-success btn-sm">
-          📥 Exporter en CSV (mêmes filtres)
-        </a>
-      </p>
-
-      <div class="table-responsive">
-        <table class="table table-sm table-striped align-middle">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Ville</th>
-              <th>Date</th>
-              <th>Type</th>
-              <th>Source</th>
-              <th>Catégorie</th>
-              <th>Moyen</th>
-              <th>Montant (€)</th>
-              <th>Utilisateur</th>
-              <th>Statut avance</th>
-              <th>Description</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows if rows else "<tr><td colspan='12' class='text-center text-muted'>Aucune opération pour ce filtre.</td></tr>"}
-          </tbody>
-        </table>
-      </div>
-    """
-    return render_page(body, "Admin compta")
-
-
-@app.route("/admin/transactions/export")
-def admin_transactions_export():
-    require_login()
-    require_admin()
-    today = date.today()
-
-    city = request.args.get("city", "all")
-    mode = request.args.get("mode", "month")
-    year_str = request.args.get("year")
-    month_str = request.args.get("month")
-
-    if year_str:
-        try:
-            year = int(year_str)
-        except ValueError:
-            year = today.year
-    else:
-        year = today.year
-
-    if month_str:
-        try:
-            month = int(month_str)
-        except ValueError:
-            month = today.month
-    else:
-        month = today.month
-
-    selected_date = date(year, max(1, min(12, month)), 1)
-    year_month = get_year_month(selected_date)
-    school_year = get_school_year_for_date(selected_date)
-
-    q = db.collection(TRANSACTIONS_COLLECTION)
-
-    if city != "all":
-        q = q.where("cityId", "==", city)
-
-    if mode == "schoolyear":
-        q = q.where("schoolYear", "==", school_year)
-        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{school_year}.csv"
-    else:
-        q = q.where("yearMonth", "==", year_month)
-        filename = f"admin_compta_{city if city!='all' else 'toutes_villes'}_{year_month}.csv"
-
-    q = q.order_by("date")
-
-    try:
-        docs = list(q.stream())
-    except Exception:
-        flash("Firestore demande peut-être un index pour l'export (admin_transactions_export).", "error")
-        return redirect(url_for("admin_transactions", city=city, mode=mode, year=year, month=month))
-
-    output = io.StringIO()
-    writer = csv.writer(output, delimiter=";")
-    writer.writerow(
-        ["id", "cityId", "date", "yearMonth", "schoolYear",
-         "type", "source", "amount", "paymentMethod",
-         "categoryName", "description", "userFullName",
-         "isAdvance", "advanceStatus"]
-    )
-
-    for doc in docs:
-        t = doc.to_dict()
-        tx_id = doc.id
-        u = get_user_by_id(t.get("userId"))
-        uname = u["fullName"] if u else ""
-        writer.writerow([
-            tx_id,
-            t.get("cityId"),
-            t.get("date"),
-            t.get("yearMonth"),
-            t.get("schoolYear"),
-            t.get("type"),
-            t.get("source"),
-            t.get("amount"),
-            t.get("paymentMethod"),
-            t.get("categoryName"),
-            t.get("description"),
-            uname,
-            t.get("isAdvance"),
-            t.get("advanceStatus"),
-        ])
-
-    csv_content = output.getvalue()
-    output.close()
-
-    return Response(
-        csv_content,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-# -------------------------------------------------------------------
-# Admin : Gestion catégories de dépenses
-# -------------------------------------------------------------------
-
-@app.route("/admin/categories", methods=["GET", "POST"])
-def admin_categories():
-    require_login()
-    require_admin()
-
-    if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        if not name:
-            flash("Le nom de la catégorie est obligatoire.", "error")
+        doc_ref = db.collection(COL_HOUSES).document(house_id)
+        if doc_ref.get().exists:
+            doc_ref.delete()
+            st.toast(f"Maison {house_id} supprimée !", icon='🗑️')
+            
+            # Invalide les caches liés aux maisons
+            get_all_houses.clear()
+            get_house_name.clear()
+            get_house_transactions.clear() 
+            st.rerun() # Recharger l'app pour rafraîchir les listes
+            return True
         else:
-            now = utc_now_iso()
-            doc_ref = db.collection(EXPENSE_CATEGORIES_COLLECTION).document()
-            doc_ref.set(
-                {
-                    "name": name,
-                    "active": True,
-                    "createdAt": now,
-                    "updatedAt": now,
-                }
-            )
-            flash(f"Catégorie '{name}' créée.", "success")
-        return redirect(url_for("admin_categories"))
+            st.error(f"Maison {house_id} introuvable.")
+            return False
+    except Exception as e:
+        st.error(f"Erreur suppression maison: {e}")
+        return False
 
-    docs = (
-        db.collection(EXPENSE_CATEGORIES_COLLECTION)
-        .order_by("name")
-        .stream()
-    )
+# --- Interfaces ---
+def admin_interface():
+    st.header("👑 Admin")
+    t1, t2, t3 = st.tabs(["Utilisateurs", "Maisons", "Audit"])
+    
+    # ---------------------------
+    # T1: Utilisateurs
+    # ---------------------------
+    with t1:
+        st.subheader("Créer un nouvel utilisateur")
+        with st.form("new_user"):
+            c1, c2, c3 = st.columns(3)
+            ti = c1.selectbox("Titre", TITLES)
+            fn = c2.text_input("Prénom")
+            ln = c3.text_input("Nom")
+            pw = st.text_input("Mdp", type="password")
+            houses = get_all_houses()
+            h_opts = {v['name']: k for k, v in houses.items()}
+            role = st.selectbox("Rôle", ROLES)
+            house = st.selectbox("Maison", list(h_opts.keys()) if h_opts else ["-"])
+            
+            if st.form_submit_button("Créer"):
+                uname = f"{fn.lower()}_{ln.lower()}"
+                # Note: Vous devriez ajouter ici une vérification si l'uname existe déjà
+                if pw:
+                    db.collection(COL_USERS).document(uname).set({
+                        'title': ti, 'first_name': fn, 'last_name': ln, 'username': uname,
+                        'password_hash': hash_password(pw), 'role': role, 'house_id': h_opts.get(house)
+                    })
+                    get_all_users.clear()
+                    st.success(f"Créé: {uname}")
+                else:
+                    st.error("Le mot de passe est requis.")
 
-    rows = ""
-    for doc in docs:
-        c = doc.to_dict()
-        cid = doc.id
-        rows += f"""
-          <tr>
-            <td>{cid}</td>
-            <td>{c.get('name')}</td>
-            <td>{"Oui" if c.get("active") else "Non"}</td>
-            <td>
-              {"-" if not c.get("active") else f'<a href="{url_for("admin_category_disable", cat_id=cid)}">Désactiver</a>'}
-            </td>
-          </tr>
-        """
-
-    body = f"""
-      <h1>Catégories de dépenses</h1>
-      <form method="post">
-        <label>Nom de la nouvelle catégorie :</label><br>
-        <input type="text" name="name" required><br>
-        <button type="submit">Ajouter</button>
-      </form>
-
-      <h2>Liste des catégories</h2>
-      <table>
-        <tr>
-          <th>ID</th>
-          <th>Nom</th>
-          <th>Active</th>
-          <th>Action</th>
-        </tr>
-        {rows if rows else "<tr><td colspan='4'>Aucune catégorie encore créée.</td></tr>"}
-      </table>
-    """
-    return render_page(body, "Catégories dépenses")
-
-
-@app.route("/admin/categories/<cat_id>/disable")
-def admin_category_disable(cat_id):
-    require_login()
-    require_admin()
-
-    ref = db.collection(EXPENSE_CATEGORIES_COLLECTION).document(cat_id)
-    doc = ref.get()
-    if not doc.exists:
-        flash("Catégorie introuvable.", "error")
-    else:
-        ref.update(
-            {
-                "active": False,
-                "updatedAt": utc_now_iso(),
-            }
-        )
-        flash("Catégorie désactivée.", "success")
-
-    return redirect(url_for("admin_categories"))
-
-
-# -------------------------------------------------------------------
-# Admin : gestion des utilisateurs + villes
-# -------------------------------------------------------------------
-
-@app.route("/admin/users", methods=["GET", "POST"])
-def admin_users():
-    require_login()
-    require_admin()
-
-    # ------------------------------------------------------
-    # POST : actions (ajout ville / ajout user / reset MDP)
-    # ------------------------------------------------------
-    if request.method == "POST":
-        action = request.form.get("action")
-
-        # --- Ajouter une nouvelle ville ---
-        if action == "add_city":
-            city_label = (request.form.get("city_label") or "").strip()
-            if not city_label:
-                flash("Nom de ville invalide.", "error")
-                return redirect(url_for("admin_users"))
-
-            # identifiant technique simple (slug)
-            slug = (
-                city_label.strip()
-                .lower()
-                .replace(" ", "-")
-                .replace("é", "e")
-                .replace("è", "e")
-                .replace("ê", "e")
-                .replace("à", "a")
-                .replace("â", "a")
-            )
-
-            city_ref = db.collection(CITIES_COLLECTION).document(slug)
-            if city_ref.get().exists:
-                flash("Cette ville existe déjà.", "error")
+        st.markdown("---")
+        st.subheader("Supprimer un utilisateur")
+        all_users = get_all_users()
+        user_opts = {f"{u_data.get('first_name', 'N/A')} {u_data.get('last_name', 'N/A')} ({k})": k 
+                     for k, u_data in all_users.items()}
+        
+        if user_opts:
+            user_to_delete_display = st.selectbox("Utilisateur à supprimer", list(user_opts.keys()), key="del_user_select")
+            user_to_delete_id = user_opts[user_to_delete_display]
+            
+            # Empêcher l'admin de se supprimer lui-même
+            if user_to_delete_id == st.session_state.get('user_id'):
+                st.warning("Vous ne pouvez pas supprimer votre propre compte.")
             else:
-                city_ref.set(
-                    {
-                        "id": slug,
-                        "label": city_label,
-                        "createdAt": utc_now_iso(),
-                    }
-                )
-                flash(f"Ville « {city_label} » ajoutée avec succès.", "success")
-
-            return redirect(url_for("admin_users"))
-
-        # --- Ajouter un utilisateur ---
-        if action == "add_user":
-            full_name = (request.form.get("full_name") or "").strip()
-            login = (request.form.get("login") or "").strip()
-            city_id = (request.form.get("city_id") or "").strip()
-            role = (request.form.get("role") or "user").strip()
-            password = request.form.get("password") or ""
-
-            if not full_name or not login or not city_id or not password:
-                flash("Tous les champs sont obligatoires pour créer un utilisateur.", "error")
-                return redirect(url_for("admin_users"))
-
-            is_admin = role == "admin"
-            is_chef = role == "chef"
-
-            password_hash = generate_password_hash(password)
-
-            db.collection(USERS_COLLECTION).add(
-                {
-                    "fullName": full_name,
-                    "login": login,
-                    "cityId": city_id,
-                    "isAdmin": is_admin,
-                    "isChef": is_chef,
-                    "passwordHash": password_hash,
-                    "createdAt": utc_now_iso(),
-                }
-            )
-
-            flash(f"Utilisateur « {full_name} » créé avec succès.", "success")
-            return redirect(url_for("admin_users"))
-
-        # --- Mettre à jour le mot de passe d'un utilisateur ---
-        if action == "reset_password":
-            user_id = request.form.get("user_id")
-            new_password = request.form.get("new_password") or ""
-
-            if not user_id or not new_password:
-                flash("Utilisateur ou mot de passe manquant pour la réinitialisation.", "error")
-                return redirect(url_for("admin_users"))
-
-            user_ref = db.collection(USERS_COLLECTION).document(user_id)
-            if not user_ref.get().exists:
-                flash("Utilisateur introuvable.", "error")
-                return redirect(url_for("admin_users"))
-
-            user_ref.update(
-                {
-                    "passwordHash": generate_password_hash(new_password),
-                    "updatedAt": utc_now_iso(),
-                }
-            )
-            flash("Mot de passe mis à jour.", "success")
-            return redirect(url_for("admin_users"))
-
-    # ------------------------------------------------------
-    # GET : affichage de la liste + formulaires
-    # ------------------------------------------------------
-
-    # Récupération des villes
-    cities = []
-    try:
-        city_docs = db.collection(CITIES_COLLECTION).stream()
-        for c in city_docs:
-            data = c.to_dict()
-            cities.append(
-                {
-                    "id": data.get("id") or c.id,
-                    "label": data.get("label") or (data.get("id") or c.id),
-                }
-            )
-    except Exception:
-        cities = []
-
-    # Si aucune ville configurée, on propose Strasbourg / Colmar par défaut
-    if not cities:
-        cities = [
-            {"id": "strasbourg", "label": "Strasbourg"},
-            {"id": "colmar", "label": "Colmar"},
-        ]
-
-    # Récupération des utilisateurs
-    users = []
-    docs = db.collection(USERS_COLLECTION).order_by("fullName").stream()
-    for doc in docs:
-        data = doc.to_dict()
-        is_admin = bool(data.get("isAdmin"))
-        is_chef = bool(data.get("isChef"))
-
-        if is_admin:
-            role_label = "Admin"
-        elif is_chef:
-            role_label = "Chef de maison"
+                if st.button(f"🗑️ Confirmer la suppression de l'utilisateur", key="del_user_btn"):
+                    delete_user(user_to_delete_id)
+                    st.rerun() 
         else:
-            role_label = "Utilisateur"
+            st.info("Aucun utilisateur à supprimer.")
 
-        users.append(
-            {
-                "id": doc.id,
-                "fullName": data.get("fullName", ""),
-                "login": data.get("login", ""),
-                "cityId": data.get("cityId", ""),
-                "roleLabel": role_label,
-            }
-        )
 
-    # HTML : options de villes
-    city_options_html = ""
-    for c in cities:
-        city_options_html += f'<option value="{c["id"]}">{c["label"]}</option>'
+    # ---------------------------
+    # T2: Maisons
+    # ---------------------------
+    with t2:
+        st.subheader("Créer une nouvelle maison")
+        with st.form("new_house"):
+            name = st.text_input("Nom Ville")
+            if st.form_submit_button("Créer"):
+                hid = name.lower().replace(' ', '_')
+                db.collection(COL_HOUSES).document(hid).set({'name': name})
+                get_all_houses.clear()
+                st.rerun()
 
-    # HTML : lignes du tableau utilisateurs
-    user_rows_html = ""
-    for u in users:
-        user_rows_html += f"""
-          <tr>
-            <td>{u["fullName"]}</td>
-            <td>{u["login"]}</td>
-            <td>{u["cityId"]}</td>
-            <td>{u["roleLabel"]}</td>
-            <td>
-              <form method="post" class="d-flex gap-2">
-                <input type="hidden" name="action" value="reset_password">
-                <input type="hidden" name="user_id" value="{u["id"]}">
-                <input type="password" name="new_password" class="form-control form-control-sm" placeholder="Nouveau mot de passe" required>
-                <button type="submit" class="btn btn-sm btn-outline-primary">Mettre à jour</button>
-              </form>
-            </td>
-          </tr>
-        """
+        st.markdown("---")
+        st.subheader("Supprimer une maison")
+        houses = get_all_houses()
+        h_opts = {v['name']: k for k, v in houses.items()}
+        
+        if h_opts:
+            house_to_delete_name = st.selectbox("Maison à supprimer", list(h_opts.keys()), key="del_house_select")
+            house_to_delete_id = h_opts[house_to_delete_name]
 
-    body = f"""
-    <h1 class="mb-4">Admin utilisateurs</h1>
+            st.error("⚠️ Cette action est IRRÉVERSIBLE et ne supprime **PAS** les transactions liées dans Firestore.")
 
-    <div class="row g-4">
-      <!-- Tableau des utilisateurs -->
-      <div class="col-lg-8">
-        <div class="card shadow-sm border-0 mb-4">
-          <div class="card-header bg-primary text-white">
-            <h5 class="mb-0">Liste des utilisateurs</h5>
-          </div>
-          <div class="card-body">
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead>
-                  <tr>
-                    <th>Nom complet</th>
-                    <th>Identifiant</th>
-                    <th>Ville</th>
-                    <th>Rôle</th>
-                    <th>Mot de passe</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {user_rows_html if user_rows_html else '<tr><td colspan="5" class="text-muted text-center">Aucun utilisateur.</td></tr>'}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
+            if st.button(f"🗑️ Confirmer la suppression de la maison '{house_to_delete_name}'", key="del_house_btn"):
+                delete_house(house_to_delete_id)
+        else:
+            st.info("Aucune maison à supprimer.")
 
-      <!-- Ajout utilisateur + Ajout ville -->
-      <div class="col-lg-4">
 
-        <!-- Ajout utilisateur -->
-        <div class="card shadow-sm border-0 mb-4">
-          <div class="card-header bg-success text-white">
-            <h5 class="mb-0">Ajouter un utilisateur</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <input type="hidden" name="action" value="add_user">
+    # ---------------------------
+    # T3: Audit
+    # ---------------------------
+    with t3:
+        all_tx = [d.to_dict() | {'id': d.id} for d in db.collection(COL_TRANSACTIONS).stream()]
+        if all_tx: st.dataframe(pd.DataFrame(all_tx))
 
-              <div class="mb-3">
-                <label class="form-label">Nom complet</label>
-                <input type="text" name="full_name" class="form-control" required>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Identifiant (login)</label>
-                <input type="text" name="login" class="form-control" required>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Ville</label>
-                <select name="city_id" class="form-select" required>
-                  <option value="">-- choisir une ville --</option>
-                  {city_options_html}
-                </select>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Rôle</label>
-                <select name="role" class="form-select" required>
-                  <option value="user">Utilisateur</option>
-                  <option value="chef">Chef de maison</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Mot de passe initial</label>
-                <input type="password" name="password" class="form-control" required>
-              </div>
-
-              <div class="d-grid">
-                <button type="submit" class="btn btn-success">Créer l'utilisateur</button>
-              </div>
-            </form>
-          </div>
-        </div>
-
-        <!-- Ajout ville -->
-        <div class="card shadow-sm border-0">
-          <div class="card-header bg-secondary text-white">
-            <h5 class="mb-0">Ajouter une ville</h5>
-          </div>
-          <div class="card-body">
-            <form method="post">
-              <input type="hidden" name="action" value="add_city">
-
-              <div class="mb-3">
-                <label class="form-label">Nom de la ville</label>
-                <input type="text" name="city_label" class="form-control" placeholder="Ex : Mulhouse" required>
-              </div>
-
-              <div class="d-grid">
-                <button type="submit" class="btn btn-secondary">Enregistrer la ville</button>
-              </div>
-            </form>
-
-            <p class="mt-2 text-muted small">
-              Le nom sera utilisé pour les nouveaux utilisateurs.
-            </p>
-          </div>
-        </div>
-
-      </div>
-    </div>
-    """
-
-    return render_page(body, "Admin utilisateurs")
-
-# -------------------------------------------------------------------
-# Initialisation complète (villes + 7 utilisateurs)
-# -------------------------------------------------------------------
-
-def init_default_users_and_cities():
-    init_cities()
-
-    # Admin principal
-    create_user(
-        user_id="admin",
-        full_name="Administrateur SMMD Alsace",
-        short_name="Admin",
-        login="admin",
-        city_id="strasbourg",
-        role="admin",
-        temp_password="odile+++",
-        must_change_password=True,
-    )
-
-    # Strasbourg
-    create_user(
-        user_id="florent_molin",
-        full_name="Abbé Florent Molin",
-        short_name="Abbé Florent",
-        login="florent.molin",
-        city_id="strasbourg",
-        role="chef",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    create_user(
-        user_id="guillaume_legall",
-        full_name="Abbé Guillaume Le Gall",
-        short_name="Abbé Guillaume",
-        login="guillaume.legall",
-        city_id="strasbourg",
-        role="user",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    create_user(
-        user_id="francois_carbonnieres",
-        full_name="Abbé François de Carbonnières",
-        short_name="Abbé François",
-        login="francois.carbonnieres",
-        city_id="strasbourg",
-        role="user",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    # Colmar
-    create_user(
-        user_id="montfort_gillet",
-        full_name="Abbé Montfort Gillet",
-        short_name="Abbé Montfort",
-        login="montfort.gillet",
-        city_id="colmar",
-        role="chef",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    create_user(
-        user_id="mederic_bertaud",
-        full_name="Frère Médéric Bertaud",
-        short_name="Frère Médéric",
-        login="mederic.bertaud",
-        city_id="colmar",
-        role="user",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    create_user(
-        user_id="paul_trifault",
-        full_name="Abbé Paul Trifault",
-        short_name="Abbé Paul",
-        login="paul.trifault",
-        city_id="colmar",
-        role="user",
-        temp_password="temp123",
-        must_change_password=True,
-    )
-
-    print("Villes et utilisateurs initiaux créés.")
-
-# -------------------------------------------------------------------
-# Lancement
-# -------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "init":
-        init_default_users_and_cities()
+# --- Main Loop ---
+if __name__ == '__main__':
+    st.set_page_config(page_title="Compta Smmd", page_icon="💰")
+    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+    
+    if st.session_state['logged_in']:
+        if st.sidebar.button("Déconnexion"): logout()
+        if st.session_state['role'] == 'admin': admin_interface()
+        else: user_dashboard()
     else:
-        app.run(host="0.0.0.0", port=5000, debug=True)
+        st.title("Connexion")
+        u = st.text_input("User (prenom_nom)")
+        p = st.text_input("Password", type="password")
+        if st.button("Se connecter"):
+            if authenticate_user(u, p): st.rerun()
+            else: st.error("Erreur")
+
+
+
