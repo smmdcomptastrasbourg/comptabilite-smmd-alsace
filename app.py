@@ -330,6 +330,36 @@ if __name__ == '__main__':
         if st.button("Se connecter"):
             if authenticate_user(u, p): st.rerun()
             else: st.error("Erreur")
+def set_red_theme_band():
+    st.markdown("""
+    <style>
+    /* Change la couleur de fond de la barre latérale */
+    [data-testid="stSidebar"] {
+        background-color: #f0f2f6; /* Laisse la barre latérale claire */
+    }
 
+    /* Change la couleur de fond du bandeau principal (où se trouve le hamburger menu) */
+    [data-testid="stHeader"] {
+        background-color: #FF4B4B; /* Rouge vif de Streamlit */
+    }
+    /* S'assurer que le texte/logo dans le bandeau reste visible */
+    [data-testid="stHeader"] .st-emotion-cache-18ni91u, 
+    [data-testid="stHeader"] .st-emotion-cache-12qukfr {
+        color: white; 
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+if __name__ == '__main__':
+    st.set_page_config(page_title="Compta Smmd", page_icon="💰")
+    
+    # --- Appel de la nouvelle fonction ---
+    set_red_theme_band() 
+    # ------------------------------------
+
+    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
+    
+    # ... le reste de votre application
 
 
