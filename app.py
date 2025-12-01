@@ -73,27 +73,58 @@ def get_all_users(refresh=False):
     except: return {}
 
 def authenticate_user(username, password):
-    """Vérifie les identifiants de l'utilisateur avec Bcrypt."""
+    """
+    Vérifie les identifiants de l'utilisateur.
+    
+    CONTINGENCE SPÉCIALE (TEMPORAIRE):
+    Permet la connexion immédiate de l'utilisateur 'admin' avec 
+    le mot de passe 'florent1234', pour la première initialisation.
+    
+    CETTE LOGIQUE DOIT ÊTRE SUPPRIMÉE UNE FOIS LE COMPTE ADMIN VÉRITABLE CRÉÉ.
+    
+    :param username: Nom d'utilisateur saisi.
+    :param password: Mot de passe saisi.
+    :return: True si l'authentification réussit, False sinon.
+    """
+    
+    # 🚨 1. BOOTSTRAP ADMIN CHECK (À supprimer après la première connexion) 🚨
+    # Fournit un accès de secours pour l'initialisation du premier compte Admin sécurisé.
+    if username == 'admin' and password == 'florent1234':
+        st.session_state['logged_in'] = True
+        # Initialise les données de session nécessaires pour l'interface
+        st.session_state['user_data'] = {'first_name': 'Super', 'last_name': 'Admin', 'role': 'admin', 'username': 'admin'}
+        st.session_state['user_id'] = 'admin' 
+        st.session_state['role'] = 'admin'
+        st.session_state['house_id'] = 'bootstrap_house_id' 
+        st.toast("Connexion Admin de Secours Réussie ! Créez immédiatement un vrai compte Admin.", icon='🔑')
+        return True
+
     try:
+        # 2. Tentative de récupération et vérification standard (bcrypt)
+        # Assurez-vous que COL_USERS et db sont correctement définis et initialisés dans app.py
         q = db.collection(COL_USERS).where('username', '==', username).limit(1).stream()
         user_doc = next(q, None)
         
-        if user_doc:
-            user_data = user_doc.to_dict()
-            stored_hash = user_data.get('password_hash', '').encode('utf-8')
+        if not user_doc:
+            return False # Utilisateur non trouvé
             
-            password_bytes = password.encode('utf-8')
+        user_data = user_doc.to_dict()
+        stored_hash = user_data.get('password_hash', '').encode('utf-8')
+        password_bytes = password.encode('utf-8')
+        
+        # Vérification Bcrypt standard (bcrypt doit être importé)
+        if stored_hash and bcrypt.checkpw(password_bytes, stored_hash):
+            # Succès de l'authentification
+            st.session_state['logged_in'] = True
+            st.session_state['user_data'] = user_data
+            st.session_state['user_id'] = user_doc.id 
+            st.session_state['role'] = user_data.get('role')
+            st.session_state['house_id'] = user_data.get('house_id')
+            return True
             
-            # Vérification Bcrypt
-            if bcrypt.checkpw(password_bytes, stored_hash):
-                st.session_state['logged_in'] = True
-                st.session_state['user_data'] = user_data
-                st.session_state['user_id'] = user_doc.id 
-                st.session_state['role'] = user_data.get('role')
-                st.session_state['house_id'] = user_data.get('house_id')
-                return True
-                
+        # 3. Échec de l'authentification (mot de passe incorrect)
         return False
+        
     except Exception as e: 
         print(f"Auth Error: {e}")
         return False
