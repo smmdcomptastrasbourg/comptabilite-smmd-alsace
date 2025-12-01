@@ -292,7 +292,58 @@ def delete_house(house_id):
 # --- Définition des Interfaces Utilisateur (User) ---
 # ----------------------------------------------------
 
-ddef user_dashboard():
+# ----------------------------------------------------
+# --- Interface de Changement de Mot de Passe ---
+# ----------------------------------------------------
+
+# ATTENTION : La variable DEFAULT_PASSWORD est nécessaire pour informer l'utilisateur.
+# Assurez-vous que cette valeur est la même que celle utilisée dans l'interface admin.
+DEFAULT_PASSWORD = "first123"
+
+def password_reset_interface(user_id):
+    """Affiche une interface pour forcer l'utilisateur à changer son mot de passe."""
+    
+    user_info = st.session_state.get('user_data', {})
+    
+    st.title(f"🔒 Bienvenue, {user_info.get('first_name')} !")
+    st.warning("⚠️ Pour votre sécurité, vous devez définir un nouveau mot de passe.")
+    st.caption(f"Le mot de passe temporaire est : `{DEFAULT_PASSWORD}`. Ne l'utilisez pas comme nouveau mot de passe.")
+
+    with st.form("reset_password_form"):
+        new_pw = st.text_input("Nouveau mot de passe", type="password")
+        confirm_pw = st.text_input("Confirmer le mot de passe", type="password")
+        
+        if st.form_submit_button("Changer mon mot de passe", type="primary"):
+            if not new_pw or len(new_pw) < 6:
+                st.error("Le nouveau mot de passe doit contenir au moins 6 caractères.")
+            elif new_pw != confirm_pw:
+                st.error("Les mots de passe ne correspondent pas.")
+            else:
+                try:
+                    # Hacher le nouveau mot de passe
+                    new_hash = hash_password(new_pw)
+                    
+                    # Mettre à jour Firestore
+                    db.collection(COL_USERS).document(user_id).update({
+                        'password_hash': new_hash,
+                        'must_change_password': False, # Désactive la demande de changement
+                        'updated_at': datetime.now().isoformat()
+                    })
+                    
+                    # Mettre à jour l'état de la session
+                    st.session_state['must_change_password'] = False
+                    st.toast("Mot de passe mis à jour avec succès !", icon='✅')
+                    st.rerun() # Recharger pour afficher le tableau de bord
+                    
+                except Exception as e:
+                    st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
+
+
+# ----------------------------------------------------
+# --- Définition des Interfaces Utilisateur (User) ---
+# ----------------------------------------------------
+
+def user_dashboard(): # <<<< VÉRIFIEZ QUE CETTE LIGNE EST BIEN 'def user_dashboard():'
     """Affiche le tableau de bord de l'utilisateur standard."""
     # S'assurer que house_id n'est pas l'ID factice de bootstrap
     hid = st.session_state['house_id'] if st.session_state['house_id'] != 'bootstrap_house_id' else None
@@ -315,107 +366,36 @@ ddef user_dashboard():
     
     t_list = st.tabs(tabs)
     
-    with t_list[0]: # Recettes
-        st.subheader("Enregistrer une Recette")
-        
-        # Récupère l'allocation actuelle (pour l'affichage par défaut)
-        current_alloc_doc = db.collection(COL_ALLOCATIONS).document(st.session_state['user_id']).get()
-        current_alloc_amount = current_alloc_doc.to_dict().get('amount', 0.0) if current_alloc_doc.exists else 0.0
-        
-        with st.form("alloc"):
-            st.markdown(f"**Allocation Mensuelle (Actuel: {current_alloc_amount} €)**")
-            v = st.number_input("Nouveau Montant de l'allocation", min_value=0.0, value=current_alloc_amount, key="alloc_v")
-            st.info("Ce nouveau montant sera appliqué au mois en cours et à tous les mois suivants.")
-            if st.form_submit_button("Valider Allocation", key="alloc_btn"): 
-                set_monthly_allocation(st.session_state['user_id'], hid, v)
-        
-        st.markdown("---")
-        with st.form("rec"):
-            st.markdown("**Recette Exceptionnelle**")
-            v = st.number_input("Montant", min_value=0.0, key="rec_v")
-            n = st.text_input("Nature (ex: Remboursement prêt)", key="rec_n")
-            if st.form_submit_button("Ajouter Recette", key="rec_btn"): 
-                # On n'enregistre pas l'ID de recette pour la suppression immédiate
-                save_transaction(hid, st.session_state['user_id'], 'recette_exceptionnelle', v, n)
-                st.rerun()
+    # ... (le reste de la fonction user_dashboard)
 
-    with t_list[1]: # Dépenses
-        st.subheader("Enregistrer une Dépense")
-        
-        # Récupère l'ID de la dernière dépense stockée (si elle existe)
-        last_depense_id = st.session_state.get('last_depense_id')
-        
-        # --- Formulaire de Dépense ---
-        with st.form("dep"):
-            v = st.number_input("Montant", min_value=0.0, key="dep_v")
-            n = st.text_input("Nature (ex: Courses Leclerc)", key="dep_n")
-            m = st.radio("Moyen de Paiement", PAYMENT_METHODS, key="dep_m")
-            if st.form_submit_button("Ajouter Dépense", key="dep_btn"):
-                typ = 'depense_maison' if m in HOUSE_PAYMENT_METHODS else 'depense_avance'
-                new_id = save_transaction(hid, st.session_state['user_id'], typ, v, n, m)
-                
-                # Stocker l'ID uniquement si c'est une dépense pour la suppression immédiate
-                if new_id and typ.startswith('depense'):
-                    st.session_state['last_depense_id'] = new_id 
-                elif 'last_depense_id' in st.session_state:
-                    # Dans le cas très improbable où on pourrait ajouter une recette ici, on nettoie
-                    del st.session_state['last_depense_id']
-                    
-                st.rerun()
+# ----------------------------------------------------
+# --- Définition des Interfaces Utilisateur (User) ---
+# ----------------------------------------------------
 
-        # --- Zone de suppression immédiate ---
-        if last_depense_id:
-            try:
-                # Tente de récupérer les détails pour l'affichage de confirmation
-                last_tx_doc = db.collection(COL_TRANSACTIONS).document(last_depense_id).get()
-                
-                # Double vérification : doc existe ET est bien une dépense
-                if last_tx_doc.exists and last_tx_doc.to_dict().get('type', '').startswith('depense'):
-                    tx_data = last_tx_doc.to_dict()
-                    st.markdown("---")
-                    st.info(f"Dernière dépense enregistrée: **{tx_data['nature']}** ({tx_data['amount']} €).")
-                    st.warning("Vous pouvez annuler immédiatement cette transaction si elle est erronée.")
-                    
-                    # Bouton de suppression immédiate
-                    if st.button("🗑️ Annuler cette Dépense (Supprimer)", key="delete_last_tx_btn"):
-                        delete_transaction(last_depense_id)
-                        # Retirer l'ID de la session après la suppression réussie
-                        # st.rerun est dans delete_transaction, ce qui relancera l'app et effacera l'affichage
-                        del st.session_state['last_depense_id'] 
-                else:
-                    # Si le doc n'existe plus ou n'est pas une dépense, on nettoie
-                    del st.session_state['last_depense_id']
-                    st.rerun()
-            except Exception as e:
-                # Gérer les erreurs de récupération (Firestore)
-                print(f"Error checking last transaction: {e}")
-                if 'last_depense_id' in st.session_state:
-                    del st.session_state['last_depense_id']
+def user_dashboard(): # <<<< VÉRIFIEZ QUE CETTE LIGNE EST BIEN 'def user_dashboard():'
+    """Affiche le tableau de bord de l'utilisateur standard."""
+    # S'assurer que house_id n'est pas l'ID factice de bootstrap
+    hid = st.session_state['house_id'] if st.session_state['house_id'] != 'bootstrap_house_id' else None
+    
+    if not hid:
+        st.warning("Vous devez être affecté à une maison pour accéder au tableau de bord. Veuillez contacter l'administrateur.")
+        return
 
-
-    if role == 'chef_de_maison' and len(t_list) > 2:
-        with t_list[2]: # Chef (Validation des Avances)
-            st.subheader("Historique des Transactions")
-            if not df.empty:
-                st.dataframe(df)
-                pending = df[(df['type'] == 'depense_avance') & (df['status'] == 'en_attente_remboursement')]
-                if not pending.empty:
-                    st.warning(f"{len(pending)} avance(s) en attente de remboursement")
-                    uids = pending['user_id'].unique()
-                    
-                    st.markdown("---")
-                    st.subheader("Valider les Remboursements")
-                    u = st.selectbox("Membre à rembourser", uids)
-                    
-                    if st.button(f"Confirmer le Remboursement des avances de {u}"):
-                        # Marque toutes les avances d'un utilisateur comme remboursées
-                        for d in db.collection(COL_TRANSACTIONS).where('user_id','==',u).where('status','==','en_attente_remboursement').stream():
-                            db.collection(COL_TRANSACTIONS).document(d.id).update({'status': 'remboursé'})
-                        st.success("Remboursements validés. Actualisation...")
-                        get_house_transactions.clear()
-                        st.rerun()
-                else:
-                    st.info("Aucune avance en attente de remboursement.")
+    role = st.session_state['role']
+    df = get_house_transactions(hid)
+    h_bal, p_bal = calculate_balances(df, st.session_state['user_id']) if not df.empty else (0,0)
+    
+    st.title(f"🏠 {get_house_name(hid)}")
+    c1, c2 = st.columns(2)
+    c1.metric("Solde Maison", f"{h_bal} €")
+    c2.metric("Vos Avances", f"{p_bal} €")
+    
+    tabs = ["Recettes", "Dépenses"]
+    if role == 'chef_de_maison': tabs.append("Chef")
+    
+    t_list = st.tabs(tabs)
+    
+    # ... (le reste de la fonction user_dashboard)
 
 # ----------------------------------------------------
 # --- Définition de l'Interface Admin ---
