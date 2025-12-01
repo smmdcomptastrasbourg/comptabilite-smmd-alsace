@@ -139,7 +139,9 @@ def logout():
 # --- Transactions & Maisons (Récupération) ---
 
 def save_transaction(house_id, user_id, type, amount, nature, payment_method=None, notes=None):
-    """Enregistre une nouvelle transaction dans Firestore."""
+    """
+    Enregistre une nouvelle transaction dans Firestore et retourne l'ID du document.
+    """
     try:
         data = {
             'house_id': house_id, 'user_id': user_id, 'type': type,
@@ -148,13 +150,13 @@ def save_transaction(house_id, user_id, type, amount, nature, payment_method=Non
             'status': 'validé' if type != 'depense_avance' else 'en_attente_remboursement', 
             'month_year': datetime.now().strftime('%Y-%m') 
         }
-        db.collection(COL_TRANSACTIONS).add(data)
+        doc_ref = db.collection(COL_TRANSACTIONS).add(data)
         st.toast("Enregistré !", icon='✅')
         get_house_transactions.clear()
-        return True
+        return doc_ref.id # Retourne l'ID du document créé
     except Exception as e:
         st.error(f"Erreur: {e}")
-        return False
+        return None
 
 @st.cache_data(ttl=60)
 def get_house_transactions(house_id):
@@ -290,9 +292,15 @@ def delete_house(house_id):
 # --- Définition des Interfaces Utilisateur (User) ---
 # ----------------------------------------------------
 
-def user_dashboard():
+ddef user_dashboard():
     """Affiche le tableau de bord de l'utilisateur standard."""
-    hid = st.session_state['house_id']
+    # S'assurer que house_id n'est pas l'ID factice de bootstrap
+    hid = st.session_state['house_id'] if st.session_state['house_id'] != 'bootstrap_house_id' else None
+    
+    if not hid:
+        st.warning("Vous devez être affecté à une maison pour accéder au tableau de bord. Veuillez contacter l'administrateur.")
+        return
+
     role = st.session_state['role']
     df = get_house_transactions(hid)
     h_bal, p_bal = calculate_balances(df, st.session_state['user_id']) if not df.empty else (0,0)
@@ -322,25 +330,68 @@ def user_dashboard():
                 set_monthly_allocation(st.session_state['user_id'], hid, v)
         
         st.markdown("---")
-        # Le formulaire "rec" pour les recettes exceptionnelles suit ici
         with st.form("rec"):
             st.markdown("**Recette Exceptionnelle**")
             v = st.number_input("Montant", min_value=0.0, key="rec_v")
             n = st.text_input("Nature (ex: Remboursement prêt)", key="rec_n")
             if st.form_submit_button("Ajouter Recette", key="rec_btn"): 
+                # On n'enregistre pas l'ID de recette pour la suppression immédiate
                 save_transaction(hid, st.session_state['user_id'], 'recette_exceptionnelle', v, n)
                 st.rerun()
 
     with t_list[1]: # Dépenses
         st.subheader("Enregistrer une Dépense")
+        
+        # Récupère l'ID de la dernière dépense stockée (si elle existe)
+        last_depense_id = st.session_state.get('last_depense_id')
+        
+        # --- Formulaire de Dépense ---
         with st.form("dep"):
             v = st.number_input("Montant", min_value=0.0, key="dep_v")
             n = st.text_input("Nature (ex: Courses Leclerc)", key="dep_n")
             m = st.radio("Moyen de Paiement", PAYMENT_METHODS, key="dep_m")
             if st.form_submit_button("Ajouter Dépense", key="dep_btn"):
                 typ = 'depense_maison' if m in HOUSE_PAYMENT_METHODS else 'depense_avance'
-                save_transaction(hid, st.session_state['user_id'], typ, v, n, m)
+                new_id = save_transaction(hid, st.session_state['user_id'], typ, v, n, m)
+                
+                # Stocker l'ID uniquement si c'est une dépense pour la suppression immédiate
+                if new_id and typ.startswith('depense'):
+                    st.session_state['last_depense_id'] = new_id 
+                elif 'last_depense_id' in st.session_state:
+                    # Dans le cas très improbable où on pourrait ajouter une recette ici, on nettoie
+                    del st.session_state['last_depense_id']
+                    
                 st.rerun()
+
+        # --- Zone de suppression immédiate ---
+        if last_depense_id:
+            try:
+                # Tente de récupérer les détails pour l'affichage de confirmation
+                last_tx_doc = db.collection(COL_TRANSACTIONS).document(last_depense_id).get()
+                
+                # Double vérification : doc existe ET est bien une dépense
+                if last_tx_doc.exists and last_tx_doc.to_dict().get('type', '').startswith('depense'):
+                    tx_data = last_tx_doc.to_dict()
+                    st.markdown("---")
+                    st.info(f"Dernière dépense enregistrée: **{tx_data['nature']}** ({tx_data['amount']} €).")
+                    st.warning("Vous pouvez annuler immédiatement cette transaction si elle est erronée.")
+                    
+                    # Bouton de suppression immédiate
+                    if st.button("🗑️ Annuler cette Dépense (Supprimer)", key="delete_last_tx_btn"):
+                        delete_transaction(last_depense_id)
+                        # Retirer l'ID de la session après la suppression réussie
+                        # st.rerun est dans delete_transaction, ce qui relancera l'app et effacera l'affichage
+                        del st.session_state['last_depense_id'] 
+                else:
+                    # Si le doc n'existe plus ou n'est pas une dépense, on nettoie
+                    del st.session_state['last_depense_id']
+                    st.rerun()
+            except Exception as e:
+                # Gérer les erreurs de récupération (Firestore)
+                print(f"Error checking last transaction: {e}")
+                if 'last_depense_id' in st.session_state:
+                    del st.session_state['last_depense_id']
+
 
     if role == 'chef_de_maison' and len(t_list) > 2:
         with t_list[2]: # Chef (Validation des Avances)
@@ -365,7 +416,6 @@ def user_dashboard():
                         st.rerun()
                 else:
                     st.info("Aucune avance en attente de remboursement.")
-
 
 # ----------------------------------------------------
 # --- Définition de l'Interface Admin ---
