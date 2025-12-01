@@ -192,22 +192,35 @@ def calculate_balances(df, uid):
     return house_bal, perso_bal
 
 def set_monthly_allocation(user_id, house_id, amount):
-    """Met à jour l'allocation mensuelle et l'enregistre comme transaction."""
+    """
+    Met à jour l'allocation mensuelle. 
+    Cette modification remplace l'ancien montant dans la base de référence 
+    (COL_ALLOCATIONS) pour les mois futurs et met à jour/crée la transaction 
+    pour le mois en cours.
+    """
     amount = round(float(amount), 2)
+    
+    # 1. Met à jour l'allocation de référence (COL_ALLOCATIONS). 
+    # CELA ASSURE QUE CE MONTANT EST L'ALLOCATION PAR DÉFAUT POUR TOUS LES MOIS SUIVANTS.
     db.collection(COL_ALLOCATIONS).document(user_id).set({'amount': amount, 'updated': datetime.now().isoformat()})
     
     current_month = datetime.now().strftime('%Y-%m')
-    # Cherche si l'allocation du mois existe déjà pour cet utilisateur
+    u_name = st.session_state['user_data'].get('first_name', 'User')
+
+    # 2. Cherche la transaction d'allocation pour le mois en cours.
     q = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).where('month_year', '==', current_month).where('type', '==', 'recette_mensuelle').limit(1).stream()
     ex = next(q, None)
     
-    u_name = st.session_state['user_data'].get('first_name', 'User')
     if ex:
-        # Met à jour la transaction existante
+        # Met à jour la transaction existante pour le mois en cours (remplace l'ancien montant)
         db.collection(COL_TRANSACTIONS).document(ex.id).update({'amount': amount})
     else:
-        # Crée une nouvelle transaction d'allocation
-        save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Alloc {u_name}")
+        # Crée une nouvelle transaction pour le mois en cours si elle n'existe pas encore
+        save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Allocation Mensuelle de {u_name}")
+        
+    st.toast(f"Allocation mensuelle mise à jour à {amount}€ pour ce mois et les suivants.", icon="💸")
+    # Invalide le cache des transactions pour refléter immédiatement le changement sur le tableau de bord
+    get_house_transactions.clear() 
     st.rerun()
 
 def delete_transaction(doc_id):
@@ -285,13 +298,20 @@ def user_dashboard():
     
     with t_list[0]: # Recettes
         st.subheader("Enregistrer une Recette")
+        
+        # Récupère l'allocation actuelle (pour l'affichage par défaut)
+        current_alloc_doc = db.collection(COL_ALLOCATIONS).document(st.session_state['user_id']).get()
+        current_alloc_amount = current_alloc_doc.to_dict().get('amount', 0.0) if current_alloc_doc.exists else 0.0
+        
         with st.form("alloc"):
-            st.markdown("**Allocation Mensuelle**")
-            v = st.number_input("Montant de l'allocation", min_value=0.0, key="alloc_v")
+            st.markdown(f"**Allocation Mensuelle (Actuel: {current_alloc_amount} €)**")
+            v = st.number_input("Nouveau Montant de l'allocation", min_value=0.0, value=current_alloc_amount, key="alloc_v")
+            st.info("Ce nouveau montant sera appliqué au mois en cours et à tous les mois suivants.")
             if st.form_submit_button("Valider Allocation", key="alloc_btn"): 
                 set_monthly_allocation(st.session_state['user_id'], hid, v)
         
         st.markdown("---")
+        # Le formulaire "rec" pour les recettes exceptionnelles suit ici
         with st.form("rec"):
             st.markdown("**Recette Exceptionnelle**")
             v = st.number_input("Montant", min_value=0.0, key="rec_v")
