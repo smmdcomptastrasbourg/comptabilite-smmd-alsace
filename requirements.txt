@@ -1,30 +1,6 @@
 streamlit
 pandas
 firebase-admin
-pytz # Souvent utile pour la gestion du temps avec Python/Firebase
-gunicorn # Laissez-le s'il était déjà là, mais il ne sera pas utilisé
+pytz 
+gunicorn 
 bcrypt
-```
-*Si vous avez un fichier `requirements.txt`, assurez-vous de l'avoir mis à jour et poussé sur Git.*
-
-### 2. Modifiez la Commande de Lancement sur Render
-
-**C'est la correction essentielle.**
-
-Vous devez vous rendre sur le tableau de bord Render et modifier la commande dans les paramètres de votre service :
-
-| Paramètre Render | Ancienne Valeur (Incorrecte) | Nouvelle Valeur (Correcte) |
-| :--------------- | :--------------------------- | :------------------------- |
-| **Start Command** | `gunicorn app:app`           | **`streamlit run app.py`** |
-
-*Remplacez `app.py` par le nom exact de votre fichier principal s'il est différent.*
-
-Une fois que vous enregistrez cette modification sur Render, cela déclenchera un nouveau déploiement. Le serveur devrait alors démarrer en utilisant le mécanisme interne de Streamlit, et vous devriez voir votre application avec le bandeau rouge.
-
-### 3. Alternative (Pour les Services Web) : Utiliser un Script `start.sh`
-
-Si Render vous donne la possibilité de spécifier un script de démarrage, vous pouvez créer un fichier nommé `start.sh` à la racine de votre dépôt et y mettre :
-
-```bash
-#!/bin/bash
-streamlit run app.py
