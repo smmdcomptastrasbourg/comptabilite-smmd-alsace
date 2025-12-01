@@ -223,12 +223,23 @@ def set_monthly_allocation(user_id, house_id, amount):
     get_house_transactions.clear() 
     st.rerun()
 
+def update_transaction(doc_id, data):
+    """Met à jour les champs d'une transaction dans Firestore."""
+    try:
+        db.collection(COL_TRANSACTIONS).document(doc_id).update(data)
+        st.toast("Transaction mise à jour !", icon='✏️')
+        get_house_transactions.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erreur de mise à jour: {e}")
+        return False
+
 def delete_transaction(doc_id):
     """Supprime une transaction par son ID de document."""
     try:
         db.collection(COL_TRANSACTIONS).document(doc_id).delete()
         st.toast("Supprimé !", icon='🗑️')
-        get_house_transactions.clear()
+        get_house_transactions.clear() # Vider le cache de toutes les maisons
         st.rerun()
     except Exception as e: st.error(str(e))
 
@@ -443,13 +454,94 @@ def admin_interface():
 
 
     # ---------------------------
-    # T3: Audit
+    # T3: Audit (Modification/Suppression des Transactions)
     # ---------------------------
     with t3:
-        st.subheader("Audit des Transactions")
-        all_tx = [d.to_dict() | {'id': d.id} for d in db.collection(COL_TRANSACTIONS).stream()]
-        if all_tx: st.dataframe(pd.DataFrame(all_tx))
-        else: st.info("Aucune transaction enregistrée.")
+        st.subheader("Audit des Transactions et Opérations")
+
+        # 1. Récupération de TOUTES les transactions
+        all_tx_stream = db.collection(COL_TRANSACTIONS).stream()
+        all_tx = [d.to_dict() | {'doc_id': d.id} for d in all_tx_stream]
+
+        if not all_tx:
+            st.info("Aucune transaction enregistrée.")
+            return
+
+        df_all_tx = pd.DataFrame(all_tx)
+        
+        # Mapping pour l'affichage (récupère les caches existants)
+        house_map = {k: v['name'] for k, v in get_all_houses().items()}
+        all_users_data = get_all_users()
+        user_map = {k: f"{v.get('first_name', 'N/A')} {v.get('last_name', 'N/A')} ({v.get('username', 'N/A')})" for k, v in all_users_data.items()}
+        
+        df_all_tx['house_name'] = df_all_tx['house_id'].map(house_map).fillna('N/A')
+        df_all_tx['user_name'] = df_all_tx['user_id'].map(user_map).fillna('N/A')
+        
+        # Colonnes à afficher pour l'audit
+        display_cols = ['doc_id', 'created_at', 'house_name', 'user_name', 'type', 'amount', 'nature', 'payment_method', 'status']
+        st.dataframe(df_all_tx[display_cols], use_container_width=True, height=300)
+
+        # 2. Section Modification/Suppression
+        st.markdown("---")
+        st.subheader("Modifier / Supprimer une Transaction")
+        
+        # Création des options de sélection
+        tx_options = {f"{row['created_at'][:10]} - {row['nature']} ({row['amount']}€) - ID: {row['doc_id']}": row['doc_id'] 
+                      for _, row in df_all_tx.sort_values(by='created_at', ascending=False).iterrows()}
+        
+        selected_tx_key = st.selectbox(
+            "Sélectionner la Transaction", 
+            list(tx_options.keys()), 
+            key="audit_tx_select"
+        )
+        selected_doc_id = tx_options[selected_tx_key]
+        
+        # Récupérer les données de la transaction sélectionnée
+        selected_tx_data = df_all_tx[df_all_tx['doc_id'] == selected_doc_id].iloc[0].to_dict()
+        
+        st.caption(f"ID du Document sélectionné : `{selected_doc_id}`")
+        
+        # 2a. Formulaire de Modification
+        st.markdown("##### ✏️ Modification")
+        
+        # Définir toutes les options possibles (pour éviter les erreurs d'index)
+        ALL_TRANSACTION_TYPES = ['recette_mensuelle', 'recette_exceptionnelle', 'depense_maison', 'depense_avance']
+        ALL_STATUS = ['validé', 'en_attente_remboursement', 'remboursé']
+        
+        # S'assurer que les valeurs par défaut existent dans les listes d'options
+        default_type = selected_tx_data.get('type')
+        default_method = selected_tx_data.get('payment_method')
+        default_status = selected_tx_data.get('status', 'validé')
+
+        with st.form("edit_tx_form"):
+            c1, c2 = st.columns(2)
+            new_amount = c1.number_input("Montant (EUR)", value=float(selected_tx_data['amount']), key="edit_amount")
+            new_nature = c2.text_input("Nature", value=selected_tx_data['nature'], key="edit_nature")
+            
+            c3, c4 = st.columns(2)
+            new_type = c3.selectbox("Type", ALL_TRANSACTION_TYPES, index=ALL_TRANSACTION_TYPES.index(default_type) if default_type in ALL_TRANSACTION_TYPES else 2, key="edit_type")
+            new_method = c4.selectbox("Moyen de Paiement", PAYMENT_METHODS, index=PAYMENT_METHODS.index(default_method) if default_method in PAYMENT_METHODS else 0, key="edit_method")
+            
+            new_status = st.selectbox("Statut", ALL_STATUS, index=ALL_STATUS.index(default_status) if default_status in ALL_STATUS else 0, key="edit_status")
+            
+            if st.form_submit_button("Sauvegarder les Modifications", type="primary"):
+                update_data = {
+                    'amount': round(float(new_amount), 2),
+                    'nature': new_nature,
+                    'type': new_type,
+                    'payment_method': new_method,
+                    'status': new_status,
+                    'updated_at': datetime.now().isoformat()
+                }
+                update_transaction(selected_doc_id, update_data)
+                st.rerun()
+
+        # 2b. Bouton de Suppression
+        st.markdown("##### 🗑️ Suppression")
+        st.error(f"La suppression est définitive pour la transaction : {selected_doc_id}")
+        if st.button(f"Supprimer la Transaction sélectionnée ({selected_tx_data['nature']})", key="delete_tx_btn"):
+            delete_transaction(selected_doc_id) # Utilise la fonction existante
+            # st.rerun() est dans delete_transaction
 
 
 # ----------------------------------------------------
