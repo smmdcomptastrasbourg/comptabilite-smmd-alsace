@@ -1,875 +1,693 @@
 import streamlit as st
-import pandas as pd
+import os
 import json
-import os
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+import pandas as pd
 from datetime import datetime
-import hashlib
-import bcrypt
-import os
-from firebase_admin import credentials, initialize_app, firestore
+import bcrypt # Nécessaire pour le hachage des mots de passe
 
-# --- Configuration & Constantes ---
-# Variables d'environnement de l'environnement Canvas
-APP_ID = os.environ.get('__app_id', 'compta-smmd-default')
-USER_ID = os.environ.get('__user_id', 'unknown_user') 
+# --- Configuration et Initialisation ---
 
-# Chemins Firestore (Public Data pour la collaboration)
-COL_USERS = f"artifacts/{APP_ID}/public/data/smmd_users"
-COL_HOUSES = f"artifacts/{APP_ID}/public/data/smmd_houses"
-COL_TRANSACTIONS = f"artifacts/{APP_ID}/public/data/smmd_transactions"
-COL_ALLOCATIONS = f"artifacts/{APP_ID}/public/data/smmd_allocations"
+# Variables d'environnement pour Canvas/Render
 
-# Constantes de l'application
-ROLES = ["admin", "chef_de_maison", "normal"]
-TITLES = ["Abbé", "Frère"]
-# Méthodes de paiement pour les DÉPENSES
-PAYMENT_METHODS = ["CB Maison", "CB Personnelle (Avance)", "Chèque Personnel (Avance)", "Liquide Personnel (Avance)"]
-# Méthodes de paiement possibles pour les RECETTES (pas vraiment utilisé ici, mais pour l'affichage)
-REVENUE_METHODS = ["Virement", "Liquide"]
+APP_ID = os.environ.get('__app_id', 'default-app-id')
+FIREBASE_CONFIG_VAR_NAME = '__firebase_config'
 
-# Constante pour le mot de passe temporaire pour la réinitialisation
-DEFAULT_PASSWORD = "first123"
+# --- Fonctions Firebase ---
 
-# --- Initialisation Firebase ---
 @st.cache_resource
 def initialize_firebase():
-    """Initialise Firebase Admin SDK avec les variables d'environnement de Canvas."""
+    """Initialise Firebase Admin SDK avec les variables d'environnement."""
+
+    # 1. Tente de lire la configuration JSON depuis l'environnement
+    firebase_config_str = os.environ.get(FIREBASE_CONFIG_VAR_NAME)
+
+    if not firebase_config_str:
+        st.error(f"Erreur: Config Firebase introuvable. Veuillez définir la variable d'environnement '{FIREBASE_CONFIG_VAR_NAME}' sur Render/Streamlit Cloud.")
+        return None
+        
     try:
-        firebase_config_str = os.environ.get('__firebase_config')
-        if not firebase_config_str:
-            st.error("Erreur: Config Firebase introuvable.")
-            return None
-        
         firebase_config = json.loads(firebase_config_str)
-        cred = credentials.Certificate(firebase_config)
-        
-        try:
-            # Tente d'initialiser une nouvelle app
-            app = initialize_app(cred, name=APP_ID)
-        except ValueError:
-            # Si elle est déjà initialisée, récupère l'instance existante
-            import firebase_admin
-            app = firebase_admin.get_app(name=APP_ID)
-            
-        return firestore.client(app=app)
-    except Exception as e:
-        st.error(f"Erreur d'initialisation de Firebase: {e}")
+    except json.JSONDecodeError:
+        st.error("Erreur: La variable d'environnement Firebase n'est pas un JSON valide.")
         return None
 
-db = initialize_firebase()
-if db is None:
-    st.stop()
+    # 2. Initialisation de Firebase
+    try:
+        # Si Firebase n'est pas déjà initialisé, l'initialiser
+        if not firebase_admin._apps:
+            # Crée les identifiants à partir du JSON du compte de service
+            cred = credentials.Certificate(firebase_config)
+            firebase_admin.initialize_app(cred, name=APP_ID)
+            
+        # 3. Récupère les instances de services
+        db_instance = firestore.client(app=firebase_admin.get_app(APP_ID))
+        
+        return db_instance
 
+    except Exception as e:
+        st.error(f"Erreur d'initialisation Firebase : {e}")
+        return None
 
-# --- Authentification & Utilisateurs ---
+# --- Fonctions de base de données (Chemins) ---
+
+def get_db():
+    """Retourne l'instance de la base de données Firestore."""
+    return initialize_firebase()
+
+def get_collection_ref(db, collection_name):
+    """Retourne la référence à une collection publique standard."""
+    # Chemin public standard pour la collaboration dans Canvas
+    return db.collection('artifacts').document(APP_ID).collection('public').document('data').collection(collection_name)
+
+def get_settings_doc_ref(db, doc_name):
+    """Retourne la référence à un document dans la collection de paramètres (smmd_settings)."""
+    return get_collection_ref(db, 'smmd_settings').document(doc_name)
+
+# --- Fonctions d'Authentification ---
+
+@st.cache_data(ttl=60) # Cache les utilisateurs pour éviter les lectures excessives
+def get_all_users():
+    """Récupère tous les utilisateurs pour la connexion."""
+    db = get_db()
+    if not db:
+        return {}
+    users_ref = get_collection_ref(db, 'smmd_users')
+    users = {}
+    try:
+        docs = users_ref.stream()
+        for doc in docs:
+            # --- CORRECTION DE L'ERREUR 'tuple' object has no attribute 'id' ---
+            if not hasattr(doc, 'id'):
+                 # Ignorer les objets inattendus pour éviter l'erreur
+                 st.warning(f"Objet inattendu trouvé dans le stream d'utilisateurs. Type: {type(doc)}")
+                 continue
+            # -----------------------------------------------------------------
+
+            user_data = doc.to_dict()
+            # Stocke l'ID du document pour les futures mises à jour
+            user_data['doc_id'] = doc.id 
+            
+            # Utilise l'email comme clé de recherche rapide
+            if 'email' in user_data:
+                users[user_data['email']] = user_data
+    except Exception as e:
+        st.error(f"Erreur de lecture des utilisateurs : {e}")
+        return {}
+    return users
+
 def hash_password(password):
-    """Hache le mot de passe en utilisant Bcrypt."""
+    """Hashe un mot de passe en utilisant bcrypt."""
     password_bytes = password.encode('utf-8')
-    # Utilise bcrypt.gensalt() pour générer un salt (intégré au hash)
-    hashed = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
-    return hashed.decode('utf-8')
+    # Utilise un salt généré aléatoirement
+    return bcrypt.hashpw(password_bytes, bcrypt.gensalt()).decode('utf-8')
 
-@st.cache_data
-def get_all_users(refresh=False):
-    """Récupère tous les utilisateurs (caché par défaut)."""
-    try:
-        docs = db.collection(COL_USERS).stream()
-        return {doc.id: doc.to_dict() for doc in docs}
-    except: return {}
-
-def authenticate_user(username, password):
+def validate_login(email, password):
     """
-    Vérifie les identifiants de l'utilisateur.
-    
-    CONTINGENCE SPÉCIALE (TEMPORAIRE):
-    Permet la connexion immédiate de l'utilisateur 'admin' avec 
-    le mot de passe 'florent1234', pour la première initialisation.
-    
-    CETTE LOGIQUE DOIT ÊTRE SUPPRIMÉE UNE FOIS LE COMPTE ADMIN VÉRITABLE CRÉÉ.
-    
-    :param username: Nom d'utilisateur saisi.
-    :param password: Mot de passe saisi.
-    :return: True si l'authentification réussit, False sinon.
-    """
-    
-    # 🚨 1. BOOTSTRAP ADMIN CHECK (À supprimer après la première connexion) 🚨
-    if username == 'admin' and password == 'florent1234':
-        st.session_state['logged_in'] = True
-        st.session_state['user_data'] = {'first_name': 'Super', 'last_name': 'Admin', 'role': 'admin', 'username': 'admin'}
-        st.session_state['user_id'] = 'admin' 
-        st.session_state['role'] = 'admin'
-        st.session_state['house_id'] = 'bootstrap_house_id' 
-        st.toast("Connexion Admin de Secours Réussie ! Créez immédiatement un vrai compte Admin.", icon='🔑')
-        return True
+    Vérifie l'email et le mot de passe.
 
+    🚨🚨 MODIFICATION TEMPORAIRE DE DÉPANNAGE 🚨🚨
+    Permet la connexion avec mot de passe en clair pour le tout premier
+    administrateur si le hachage a échoué.
+    """
+    users = get_all_users()
+    user_data = users.get(email)
+
+    if not user_data:
+        st.error("Email ou mot de passe incorrect.")
+        return None
+
+    hashed_password_db = user_data.get('password', '').encode('utf-8')
+
+    # 1. Tentative de vérification Bcrypt (Méthode sécurisée standard)
     try:
-        # 2. Tentative de récupération et vérification standard (bcrypt)
-        q = db.collection(COL_USERS).where('username', '==', username).limit(1).stream()
-        user_doc = next(q, None)
-        
-        if not user_doc:
-            return False # Utilisateur non trouvé
-            
-        user_data = user_doc.to_dict()
-        stored_hash = user_data.get('password_hash', '').encode('utf-8')
-        password_bytes = password.encode('utf-8')
-        
-        # Vérification Bcrypt standard (bcrypt doit être importé)
-        if stored_hash and bcrypt.checkpw(password_bytes, stored_hash):
-            # Succès de l'authentification
+        # Vérifie si le mot de passe entré correspond au hash stocké
+        if bcrypt.checkpw(password.encode('utf-8'), hashed_password_db):
             st.session_state['logged_in'] = True
-            st.session_state['user_data'] = user_data
-            st.session_state['user_id'] = user_doc.id 
-            st.session_state['role'] = user_data.get('role')
-            st.session_state['house_id'] = user_data.get('house_id')
-            
-            # Vérifie si le mot de passe doit être changé
-            must_change = user_data.get('must_change_password', False)
-            if must_change:
-                 st.session_state['must_change_password'] = True
-            
-            return True
-            
-        # 3. Échec de l'authentification (mot de passe incorrect)
-        return False
-        
-    except Exception as e: 
-        print(f"Auth Error: {e}")
-        return False
+            st.session_state['user'] = user_data
+            return user_data
+    except ValueError:
+        # Ceci se produit si le hash stocké n'est pas un hash Bcrypt valide
+        pass 
+
+    # 2. 🚨 LOGIQUE DE DÉPANNAGE TEMPORAIRE 🚨
+    # Si le Bcrypt échoue ET que le mot de passe stocké EST EN CLAIR :
+    if password == user_data.get('password'):
+        # On ne permet ceci que pour les admins (pour limiter l'abus)
+        if user_data.get('role') == 'admin':
+            st.warning("Connexion effectuée avec mot de passe en clair (mode dépannage). VEUILLEZ CHANGER CE MOT DE PASSE IMMÉDIATEMENT.")
+            st.session_state['logged_in'] = True
+            st.session_state['user'] = user_data
+            return user_data
+        else:
+            st.error("Mot de passe incorrect (mode Bcrypt non valide).")
+            return None
+
+    st.error("Email ou mot de passe incorrect.")
+    return None
 
 def logout():
-    """Déconnecte l'utilisateur et recharge l'application."""
+    """Déconnecte l'utilisateur."""
     st.session_state['logged_in'] = False
-    st.session_state['user_data'] = {}
-    st.session_state['role'] = None
-    if 'must_change_password' in st.session_state: del st.session_state['must_change_password']
-    st.rerun()
+    st.session_state['user'] = {}
+    st.cache_data.clear() # Efface le cache des utilisateurs/données
 
-# --- Transactions & Maisons (Récupération) ---
-
-def save_transaction(house_id, user_id, type, amount, nature, payment_method=None, notes=None):
-    """
-    Enregistre une nouvelle transaction dans Firestore et retourne l'ID du document.
-    """
-    try:
-        data = {
-            'house_id': house_id, 'user_id': user_id, 'type': type,
-            'amount': round(float(amount), 2), 'nature': nature,
-            'payment_method': payment_method, 'created_at': datetime.now().isoformat(),
-            'status': 'validé' if type != 'depense_avance' else 'en_attente_remboursement', 
-            'month_year': datetime.now().strftime('%Y-%m') 
-        }
-        doc_ref = db.collection(COL_TRANSACTIONS).add(data)
-        st.toast("Enregistré !", icon='✅')
-        get_house_transactions.clear()
-        return doc_ref.id # Retourne l'ID du document créé
-    except Exception as e:
-        st.error(f"Erreur: {e}")
-        return None
+# --- Fonctions de Gestion des Catégories ---
 
 @st.cache_data(ttl=60)
-def get_house_transactions(house_id):
-    """Récupère toutes les transactions d'une maison donnée."""
+def get_expense_categories(db):
+    """Récupère la liste des catégories de dépenses."""
+    categories_ref = get_settings_doc_ref(db, 'expense_categories')
     try:
-        query = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
-        return pd.DataFrame([d.to_dict() | {'doc_id': d.id} for d in query])
-    except: return pd.DataFrame()
+        doc = categories_ref.get()
+        if doc.exists:
+            return doc.to_dict().get('categories', [])
+        return []
+    except Exception as e:
+        st.error(f"Erreur de lecture des catégories : {e}")
+        return []
 
-@st.cache_data
-def get_all_houses():
-    """Récupère toutes les maisons (villes) enregistrées."""
+def save_expense_categories(db, categories_list):
+    """Enregistre la liste mise à jour des catégories de dépenses."""
+    categories_ref = get_settings_doc_ref(db, 'expense_categories')
     try:
-        docs = db.collection(COL_HOUSES).stream()
-        return {doc.id: doc.to_dict() for doc in docs}
-    except: return {}
-
-@st.cache_data
-def get_house_name(house_id):
-    """Récupère le nom d'une maison à partir de son ID."""
-    try:
-        doc = db.collection(COL_HOUSES).document(house_id).get()
-        return doc.to_dict().get('name', 'Inconnue') if doc.exists else 'Inconnue'
-    except: return 'Inconnue'
-
-def calculate_balances(df, uid):
-    """Calcule le solde de la maison et le solde des avances de l'utilisateur."""
-    # Recettes = recettes mensuelles + recettes exceptionnelles
-    recettes = df[df['type'].str.contains('recette')]['amount'].sum()
-    
-    # Dépenses Maison = Dépenses payées avec la CB Maison (type 'depense_maison')
-    depenses_maison = df[(df['type'] == 'depense_maison') & (df['payment_method'] == 'CB Maison')]['amount'].sum()
-    
-    # Solde de la maison = Total Recettes - Total Dépenses Maison
-    house_bal = round(recettes - depenses_maison, 2)
-    
-    # Avances Personnelles = Dépenses faites par l'utilisateur avec son argent personnel
-    avances = df[(df['user_id'] == uid) & (df['type'] == 'depense_avance')]['amount'].sum()
-    
-    # Remboursements = Les avances de cet utilisateur qui ont été marquées comme 'remboursé'
-    remb = df[(df['user_id'] == uid) & (df['type'] == 'depense_avance') & (df['status'] == 'remboursé')]['amount'].sum()
-    
-    # Solde des avances = Avances faites - Avances remboursées (doit être positif pour l'utilisateur)
-    perso_bal = round(avances - remb, 2)
-    
-    return house_bal, perso_bal
-
-def set_monthly_allocation(user_id, house_id, amount):
-    """
-    Met à jour l'allocation mensuelle. 
-    Cette modification remplace l'ancien montant dans la base de référence 
-    (COL_ALLOCATIONS) pour les mois futurs et met à jour/crée la transaction 
-    pour le mois en cours.
-    """
-    amount = round(float(amount), 2)
-    
-    # 1. Met à jour l'allocation de référence (COL_ALLOCATIONS). 
-    # CELA ASSURE QUE CE MONTANT EST L'ALLOCATION PAR DÉFAUT POUR TOUS LES MOIS SUIVANTS.
-    db.collection(COL_ALLOCATIONS).document(house_id).set({'amount': amount, 'updated': datetime.now().isoformat()})
-    
-    current_month = datetime.now().strftime('%Y-%m')
-    h_name = get_house_name(house_id)
-
-    # 2. Cherche la transaction d'allocation pour le mois en cours (pour TOUS les utilisateurs)
-    # L'allocation est généralement un versement pour la maison, pas un versement par utilisateur.
-    # On va la lier à un document unique par mois/maison.
-    doc_id = f"{house_id}_{current_month}_allocation"
-    
-    tx_ref = db.collection(COL_TRANSACTIONS).document(doc_id)
-    
-    if tx_ref.get().exists:
-        # Met à jour la transaction existante pour le mois en cours (remplace l'ancien montant)
-        tx_ref.update({'amount': amount})
-    else:
-        # Crée une nouvelle transaction pour le mois en cours si elle n'existe pas encore
-        # On utilise le user_id de l'admin/chef qui a défini l'allocation pour la traçabilité
-        data = {
-            'house_id': house_id, 'user_id': user_id, 'type': 'recette_mensuelle',
-            'amount': amount, 'nature': f"Allocation Mensuelle pour {h_name} ({current_month})",
-            'payment_method': 'Virement', 'created_at': datetime.now().isoformat(),
-            'status': 'validé', 'month_year': current_month 
-        }
-        db.collection(COL_TRANSACTIONS).document(doc_id).set(data)
-        
-    st.toast(f"Allocation mensuelle mise à jour à {amount}€ pour ce mois et les suivants.", icon="💸")
-    # Invalide le cache des transactions pour refléter immédiatement le changement sur le tableau de bord
-    get_house_transactions.clear() 
-    st.rerun()
-
-def get_monthly_allocation(house_id):
-    """Récupère l'allocation mensuelle de référence pour une maison."""
-    try:
-        doc = db.collection(COL_ALLOCATIONS).document(house_id).get()
-        return doc.to_dict().get('amount', 0.0) if doc.exists else 0.0
-    except: return 0.0
-
-def update_transaction(doc_id, data):
-    """Met à jour les champs d'une transaction dans Firestore."""
-    try:
-        db.collection(COL_TRANSACTIONS).document(doc_id).update(data)
-        st.toast("Transaction mise à jour !", icon='✏️')
-        get_house_transactions.clear()
+        # Stocke les catégories dans un tableau
+        categories_ref.set({'categories': categories_list}, merge=True)
+        st.cache_data.clear() # Invalide le cache des catégories
         return True
     except Exception as e:
-        st.error(f"Erreur de mise à jour: {e}")
+        st.error(f"Erreur lors de l'enregistrement des catégories : {e}")
         return False
 
-def delete_transaction(doc_id):
-    """Supprime une transaction par son ID de document."""
+# --- Fonctions de Gestion des Transactions ---
+
+def save_transaction(db, transaction_data):
+    """Enregistre une nouvelle transaction dans la collection smmd_transactions."""
+    transactions_ref = get_collection_ref(db, 'smmd_transactions')
     try:
-        db.collection(COL_TRANSACTIONS).document(doc_id).delete()
-        st.toast("Supprimé !", icon='🗑️')
-        get_house_transactions.clear() # Vider le cache de toutes les maisons
-        st.rerun()
-    except Exception as e: st.error(str(e))
-
-
-# --- Fonctions de Suppression Admin ---
-
-def delete_user(user_id):
-    """Supprime un utilisateur de la collection COL_USERS."""
-    try:
-        doc_ref = db.collection(COL_USERS).document(user_id)
-        if doc_ref.get().exists:
-            doc_ref.delete()
-            st.toast(f"Utilisateur {user_id} supprimé !", icon='🗑️')
-            get_all_users.clear() # Invalide le cache des utilisateurs
-            return True
-        else:
-            st.error(f"Utilisateur {user_id} introuvable.")
-            return False
+        transactions_ref.add(transaction_data)
+        st.cache_data.clear() # Invalide le cache des transactions
+        return True
     except Exception as e:
-        st.error(f"Erreur suppression utilisateur: {e}")
+        st.error(f"Erreur lors de l'enregistrement de l'opération: {e}")
         return False
 
-def delete_house(house_id):
-    """
-    Supprime une maison de la collection COL_HOUSES.
-    ⚠️ Avertissement: Les transactions associées ne sont PAS supprimées.
-    """
+@st.cache_data(ttl=60)
+def get_transactions(db):
+    """Récupère toutes les transactions."""
+    transactions_ref = get_collection_ref(db, 'smmd_transactions')
+    transactions = []
     try:
-        doc_ref = db.collection(COL_HOUSES).document(house_id)
-        if doc_ref.get().exists:
-            doc_ref.delete()
-            st.toast(f"Maison {house_id} supprimée !", icon='🗑️')
-            
-            # Invalide les caches liés aux maisons
-            get_all_houses.clear()
-            get_house_name.clear()
-            get_house_transactions.clear() 
-            st.rerun() 
-            return True
-        else:
-            st.error(f"Maison {house_id} introuvable.")
-            return False
-    except Exception as e:
-        st.error(f"Erreur suppression maison: {e}")
-        return False
+        docs = transactions_ref.stream()
+        for doc in docs:
+            # --- CORRECTION DE L'ERREUR 'tuple' object has no attribute 'id' ---
+            if not hasattr(doc, 'id'):
+                 # Ignorer les objets inattendus pour éviter l'erreur
+                 st.warning(f"Objet inattendu trouvé dans le stream de transactions. Type: {type(doc)}")
+                 continue
+            # -----------------------------------------------------------------
 
-# ----------------------------------------------------
-# --- Interface de Changement de Mot de Passe ---
-# ----------------------------------------------------
+            data = doc.to_dict()
+            data['doc_id'] = doc.id # Stocke l'ID du document pour référence future
 
-def password_reset_interface(user_id):
-    """Affiche une interface pour forcer l'utilisateur à changer son mot de passe."""
-    
-    user_info = st.session_state.get('user_data', {})
-    
-    st.title(f"🔒 Bienvenue, {user_info.get('first_name')} !")
-    st.warning("⚠️ Pour votre sécurité, vous devez définir un nouveau mot de passe.")
-    st.caption(f"Le mot de passe temporaire est : `{DEFAULT_PASSWORD}`. Ne l'utilisez pas comme nouveau mot de passe.")
-
-    with st.form("reset_password_form"):
-        new_pw = st.text_input("Nouveau mot de passe", type="password")
-        confirm_pw = st.text_input("Confirmer le mot de passe", type="password")
+            # Assure que le montant est un nombre
+            try:
+                data['amount'] = float(data.get('amount', 0))
+            except ValueError:
+                data['amount'] = 0.0
+                
+            transactions.append(data)
         
-        if st.form_submit_button("Changer mon mot de passe", type="primary"):
-            if not new_pw or len(new_pw) < 6:
-                st.error("Le nouveau mot de passe doit contenir au moins 6 caractères.")
-            elif new_pw != confirm_pw:
-                st.error("Les mots de passe ne correspondent pas.")
-            else:
+        # Convertit en DataFrame pour un traitement facile
+        df = pd.DataFrame(transactions)
+        
+        # Assure les colonnes nécessaires (si aucune transaction n'existe)
+        if df.empty:
+             df = pd.DataFrame(columns=['type', 'expense_category', 'description', 'amount', 'date', 'recorded_by', 'doc_id'])
+        
+        # Convertit la colonne 'date' en datetime, en gérant les timestamps Firestore
+        if 'date' in df.columns:
+            # Gère les dates stockées sous forme de timestamps Firestore
+            df['date'] = df['date'].apply(
+                lambda x: x.strftime('%Y-%m-%d') if isinstance(x, datetime) else pd.to_datetime(x).strftime('%Y-%m-%d')
+            )
+
+        return df
+
+    except Exception as e:
+        st.error(f"Erreur de lecture des opérations : {e}")
+        return pd.DataFrame()
+
+# --- Pages et Sections de l'Application ---
+
+def login_page():
+    """Page de connexion et de déconnexion."""
+    st.title("Connexion SMMD Alsace")
+
+    with st.container(border=True):
+        email = st.text_input("Email")
+        password = st.text_input("Mot de passe", type="password")
+        
+        if st.button("Se connecter", type="primary"):
+            user = validate_login(email, password)
+            if user:
+                st.success(f"Bienvenue, {user.get('name')}!")
+                st.rerun() # Rafraîchit pour afficher la page principale
+        
+        if st.session_state.get('logged_in'):
+            st.button("Déconnexion", on_click=logout)
+
+def setup_allocation_page(db, user_data):
+    """Page pour définir l'allocation mensuelle initiale."""
+    st.title("Configuration Initiale : Votre Allocation Mensuelle")
+    st.markdown(f"Bienvenue, **{user_data.get('name')}**. Pour commencer, veuillez définir votre allocation budgétaire mensuelle.")
+
+    with st.form("allocation_form", clear_on_submit=False):
+        allocation = st.number_input(
+            "Montant de l'allocation mensuelle (€)",
+            min_value=0.01,
+            value=1500.00,
+            step=50.00,
+            format="%.2f"
+        )
+        submitted = st.form_submit_button("Enregistrer l'Allocation", type="primary")
+
+        if submitted:
+            # Récupérer l'ID du document utilisateur stocké dans l'état de session
+            user_doc_id = user_data.get('doc_id')
+            
+            if user_doc_id:
                 try:
-                    # Hacher le nouveau mot de passe
-                    new_hash = hash_password(new_pw)
+                    users_ref = get_collection_ref(db, 'smmd_users')
+                    user_doc_ref = users_ref.document(user_doc_id)
                     
-                    # Mettre à jour Firestore
-                    db.collection(COL_USERS).document(user_id).update({
-                        'password_hash': new_hash,
-                        'must_change_password': False, # Désactive la demande de changement
-                        'updated_at': datetime.now().isoformat()
+                    user_doc_ref.update({
+                        'monthly_allocation': allocation,
                     })
                     
-                    # Mettre à jour l'état de la session
-                    st.session_state['must_change_password'] = False
-                    st.toast("Mot de passe mis à jour avec succès !", icon='✅')
-                    st.rerun() # Recharger pour afficher le tableau de bord
+                    # Mettre à jour l'état de session pour refléter le changement
+                    st.session_state['user']['monthly_allocation'] = allocation
                     
+                    st.success(f"Allocation de {allocation:.2f} € enregistrée avec succès!")
+                    st.balloons()
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
-
-
-# ----------------------------------------------------
-# --- Définition des Interfaces Utilisateur (User) ---
-# ----------------------------------------------------
-
-# --- Sous-Interfaces du Tableau de Bord ---
-
-def render_revenue_tab(house_id, user_id):
-    """Interface pour les recettes (mensuelles/exceptionnelles)."""
-    st.subheader("Enregistrer une Recette")
-    
-    current_alloc = get_monthly_allocation(house_id)
-    st.info(f"L'allocation mensuelle de référence actuelle est de **{current_alloc} €**.")
-
-    with st.form("revenue_form"):
-        # Les recettes mensuelles sont gérées par le chef de maison, donc on se concentre sur l'exceptionnel ici
-        amount = st.number_input("Montant (EUR)", min_value=0.01, format="%.2f", key="rev_amount")
-        nature = st.text_input("Nature de la recette (ex: Don pour la réfection du toit)", key="rev_nature")
-        revenue_type = st.selectbox("Type de Recette", ["recette_exceptionnelle"], key="rev_type")
-        
-        # On pourrait ajouter la source de paiement si nécessaire, mais on simplifie ici
-        
-        if st.form_submit_button("Enregistrer la Recette", type="primary"):
-            if nature and amount > 0:
-                # La recette est toujours considérée comme 'CB Maison' pour le solde de la maison
-                save_transaction(house_id, user_id, revenue_type, amount, nature, payment_method="Virement")
+                    st.error(f"Erreur lors de l'enregistrement de l'allocation: {e}")
             else:
-                st.error("Veuillez remplir la nature et le montant.")
+                st.error("Erreur critique: ID de document utilisateur manquant.")
 
-def render_expense_tab(house_id, user_id):
-    """Interface pour les dépenses (maison/avance personnelle)."""
-    st.subheader("Enregistrer une Dépense")
+def transaction_form_section(db, transaction_type):
+    """Section de formulaire pour Recettes, Dépenses ou Avances."""
     
-    with st.form("expense_form"):
-        c1, c2 = st.columns(2)
-        amount = c1.number_input("Montant (EUR)", min_value=0.01, format="%.2f", key="exp_amount")
-        nature = c2.text_input("Nature de la dépense (ex: Électricité, Fournitures)", key="exp_nature")
-        
-        payment_method = st.selectbox("Moyen de Paiement", PAYMENT_METHODS, key="exp_method")
-        
-        if st.form_submit_button("Enregistrer la Dépense", type="primary"):
-            if nature and amount > 0:
-                if "CB Maison" in payment_method:
-                    tx_type = 'depense_maison'
-                else: # CB Personnelle, Chèque Personnel, Liquide Personnel
-                    tx_type = 'depense_avance'
-
-                save_transaction(house_id, user_id, tx_type, amount, nature, payment_method)
-            else:
-                st.error("Veuillez remplir la nature et le montant.")
-
-def render_chef_tab(house_id, user_id):
-    """Interface pour le Chef de Maison."""
-    st.subheader("Configuration et Avances en Attente")
-
-    # 1. Configuration de l'Allocation Mensuelle
-    st.markdown("##### 💸 Allocation Mensuelle")
-    current_alloc = get_monthly_allocation(house_id)
-    st.info(f"L'allocation mensuelle de référence actuelle est de **{current_alloc} €**.")
-
-    with st.form("allocation_form"):
-        new_alloc = st.number_input(
-            "Nouveau Montant de l'Allocation (EUR)", 
-            min_value=0.00, 
-            value=current_alloc,
-            format="%.2f",
-            key="new_alloc"
-        )
-        if st.form_submit_button("Définir l'Allocation (Mois en cours et suivants)", type="primary"):
-            set_monthly_allocation(user_id, house_id, new_alloc) # Redémarrage dans la fonction
-
-
-    # 2. Validation des Avances Personnelles
-    st.markdown("---")
-    st.markdown("##### ✅ Remboursements en Attente")
-    df = get_house_transactions(house_id)
-    
-    if df.empty:
-        st.info("Aucune transaction enregistrée pour cette maison.")
-        return
-
-    # Filtrer les transactions en attente de remboursement
-    advances_pending = df[
-        (df['type'] == 'depense_avance') & 
-        (df['status'] == 'en_attente_remboursement')
-    ].sort_values(by='created_at', ascending=True)
-
-    if advances_pending.empty:
-        st.success("Aucune avance en attente de remboursement.")
-        return
-
-    # Mapping des user_id aux noms d'utilisateurs pour une meilleure lisibilité
-    all_users_data = get_all_users()
-    user_map = {k: f"{v.get('first_name', 'N/A')} {v.get('last_name', 'N/A')}" for k, v in all_users_data.items()}
-    advances_pending['user_name'] = advances_pending['user_id'].map(user_map).fillna('N/A')
-
-    st.warning(f"{len(advances_pending)} avance(s) en attente de validation.")
-    
-    # Affichage des transactions en attente dans un formulaire pour la validation
-    with st.form("validate_advances_form"):
-        st.dataframe(
-            advances_pending[['created_at', 'user_name', 'amount', 'nature']],
-            column_config={
-                "created_at": st.column_config.DatetimeColumn("Date", format="DD MMM"),
-                "user_name": "Auteur",
-                "amount": st.column_config.NumberColumn("Montant (€)", format="%.2f €"),
-                "nature": "Nature"
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-
-        selected_tx_id = st.selectbox(
-            "Sélectionner l'avance à valider/rembourser",
-            options=advances_pending['doc_id'].tolist(),
-            format_func=lambda doc_id: f"{user_map.get(advances_pending[advances_pending['doc_id'] == doc_id]['user_id'].iloc[0], 'N/A')} - {advances_pending[advances_pending['doc_id'] == doc_id]['nature'].iloc[0]} ({advances_pending[advances_pending['doc_id'] == doc_id]['amount'].iloc[0]}€)"
-        )
-        
-        # Bouton de validation/remboursement
-        if st.form_submit_button("Marquer comme Remboursé", type="primary"):
-            if selected_tx_id:
-                # Mise à jour du statut dans Firestore
-                update_transaction(selected_tx_id, {'status': 'remboursé', 'reimbursed_by_user_id': user_id, 'reimbursed_at': datetime.now().isoformat()})
-                st.rerun()
-            else:
-                st.error("Veuillez sélectionner une transaction.")
-
-def render_transaction_history(df):
-    """Affiche l'historique des transactions dans un tableau de données."""
-    st.markdown("---")
-    st.subheader("Historique des Transactions")
-
-    if df.empty:
-        st.info("Aucune transaction enregistrée pour cette maison.")
-        return
-        
-    # Tri par date décroissante
-    df_display = df.sort_values(by='created_at', ascending=False)
-
-    # Préparation des mappings pour l'affichage
-    all_users_data = get_all_users()
-    user_map = {k: f"{v.get('first_name', 'N/A')} {v.get('last_name', 'N/A')}" for k, v in all_users_data.items()}
-    
-    df_display['user_name'] = df_display['user_id'].map(user_map).fillna('N/A')
-    
-    # Remplacer les codes de type et statut par des libellés lisibles
-    type_map = {
-        'recette_mensuelle': 'Allocation Mensuelle', 
-        'recette_exceptionnelle': 'Recette Exceptionnelle',
-        'depense_maison': 'Dépense Maison', 
-        'depense_avance': 'Avance Personnelle'
+    # Détermine le libellé pour le type de transaction
+    type_labels = {
+        'revenue': 'Recette', 
+        'expense': 'Dépense', 
+        'advance': 'Avance'
     }
-    status_map = {
-        'validé': '✅ Validé', 
-        'en_attente_remboursement': '⏳ Attente Remb.', 
-        'remboursé': '💰 Remboursé'
-    }
-
-    df_display['Type'] = df_display['type'].map(type_map).fillna(df_display['type'])
-    df_display['Statut'] = df_display['status'].map(status_map).fillna(df_display['status'])
+    label = type_labels.get(transaction_type, 'Opération')
     
-    display_cols = ['created_at', 'Type', 'amount', 'nature', 'payment_method', 'user_name', 'Statut']
+    col_amount, col_date = st.columns([1, 1])
+    
+    with st.form(f"form_{transaction_type}", clear_on_submit=True):
+        
+        # Champ Montant
+        with col_amount:
+            # Le montant est négatif pour les dépenses et avances, positif pour les recettes
+            amount = st.number_input(f"Montant de la {label} (€)", min_value=0.01, format="%.2f")
 
-    st.dataframe(
-        df_display[display_cols],
-        column_config={
-            "created_at": st.column_config.DatetimeColumn("Date", format="DD MMM YYYY"),
-            "Type": "Type de Transaction",
-            "amount": st.column_config.NumberColumn("Montant (€)", format="%.2f €"),
-            "nature": "Nature",
-            "payment_method": "Moyen de Paiement",
-            "user_name": "Auteur",
-            "Statut": "Statut"
-        },
-        hide_index=True,
-        use_container_width=True,
-        height=350
+        # Champ Date
+        with col_date:
+            date_trans = st.date_input("Date de l'opération", datetime.now().date())
+        
+        
+        # --- Gestion spécifique pour les Dépenses (Catégories) ---
+        category = None
+        if transaction_type == 'expense':
+            expense_categories = get_expense_categories(db)
+            if expense_categories:
+                # Ajoute une option "--- Choisir une catégorie ---" en première position
+                categories_list = sorted(expense_categories)
+                categories_list.insert(0, "--- Choisir une catégorie ---")
+                
+                category = st.selectbox("Catégorie de Dépense", categories_list)
+                
+                # La description devient optionnelle si une catégorie est sélectionnée
+                description = st.text_area("Description / Motif (Optionnel)", max_chars=250)
+                
+                # Validation pour s'assurer qu'au moins la catégorie est choisie OU qu'une description est fournie
+                is_valid_expense = (category != "--- Choisir une catégorie ---") or description
+                if not is_valid_expense:
+                    st.warning("Veuillez sélectionner une catégorie ou fournir une description détaillée.")
+
+
+                # Construction de la description finale pour la base de données
+                if category != "--- Choisir une catégorie ---":
+                    transaction_description = f"[{category}]{f' - {description}' if description else ''}"
+                else:
+                    transaction_description = description
+                    
+            else:
+                st.warning("Aucune catégorie de dépense définie. Veuillez en ajouter dans l'onglet 'Paramètres & Gestion'.")
+                description = st.text_area("Description / Motif", max_chars=250)
+                transaction_description = description
+                category = "Non catégorisé"
+        
+        else: # Pour Recette et Avance
+            description = st.text_area("Description / Motif", max_chars=250)
+            transaction_description = description
+
+        # Bouton de soumission
+        submitted = st.form_submit_button(f"Enregistrer la {label}", type="primary")
+        
+        if submitted:
+            # Validation plus stricte à la soumission pour Recette/Avance
+            if transaction_type != 'expense' and not transaction_description:
+                st.warning("Veuillez fournir une description.")
+                return
+            
+            # Validation de la dépense
+            if transaction_type == 'expense' and not is_valid_expense:
+                # Afficher l'avertissement déjà défini et arrêter
+                return
+            
+            # Ajustement du signe du montant
+            final_amount = amount
+            if transaction_type in ['expense', 'advance']:
+                final_amount = -amount # Dépenses et avances sont négatives
+            
+            transaction_data = {
+                'type': transaction_type,
+                'description': transaction_description,
+                'amount': final_amount,
+                'date': date_trans.strftime('%Y-%m-%d'), # Stocke en format string ISO 8601
+                'recorded_by': st.session_state.user.get('name'),
+                'recorded_at': firestore.SERVER_TIMESTAMP,
+            }
+            
+            # Ajoute la catégorie explicitement pour les dépenses (pour les filtres futurs)
+            if transaction_type == 'expense' and category and category != "--- Choisir une catégorie ---":
+                transaction_data['expense_category'] = category
+            else:
+                # Si non catégorisé, assure que la clé n'est pas présente ou est vide
+                transaction_data['expense_category'] = "" 
+
+            if save_transaction(db, transaction_data):
+                st.success(f"{label} de {final_amount:.2f} € enregistrée avec succès!")
+
+def data_export_section(df_transactions):
+    """Section pour l'affichage et l'exportation des données."""
+    st.header("Historique Détaillé et Exportation")
+    
+    if df_transactions.empty:
+        st.info("Aucune opération enregistrée pour le moment.")
+        return
+
+    # Calcul du solde actuel
+    balance = df_transactions['amount'].sum()
+    st.metric("Solde Total Actuel", f"{balance:.2f} €", delta_color="normal")
+    
+    st.subheader("Filtres")
+    
+    # Ajout d'une colonne de filtre pour la catégorie de dépense
+    cols_filter = st.columns(4)
+    
+    with cols_filter[0]:
+        # Assure que 'Toutes' est la première option si les types existent
+        type_options = ['Toutes'] + list(df_transactions['type'].unique())
+        selected_type = st.selectbox("Filtrer par Type", type_options)
+
+    with cols_filter[1]:
+        # Filtre Catégorie de Dépense (uniquement si le type est 'expense' ou 'Toutes')
+        category_options = ['Toutes']
+        if 'expense_category' in df_transactions.columns:
+            # Utilise un set pour obtenir les valeurs uniques et retire les chaînes vides, puis trie
+            unique_categories = {c for c in df_transactions['expense_category'].dropna().unique() if c}
+            category_options += sorted(list(unique_categories))
+        
+        selected_category = st.selectbox("Filtrer par Catégorie", category_options)
+        
+    # Assure que les dates min et max existent avant d'essayer de les convertir
+    if 'date' in df_transactions.columns and not df_transactions['date'].empty:
+        min_date_val = pd.to_datetime(df_transactions['date']).min()
+        max_date_val = pd.to_datetime(df_transactions['date']).max()
+    else:
+        min_date_val = datetime.now().date()
+        max_date_val = datetime.now().date()
+
+    with cols_filter[2]:
+        min_filter = st.date_input("Date de début", value=min_date_val, min_value=min_date_val)
+
+    with cols_filter[3]:
+        max_filter = st.date_input("Date de fin", value=max_date_val, max_value=max_date_val)
+        
+    df_filtered = df_transactions.copy()
+
+    # Application des filtres
+    if selected_type != 'Toutes':
+        df_filtered = df_filtered[df_filtered['type'] == selected_type]
+
+    if selected_category != 'Toutes':
+        df_filtered = df_filtered[df_filtered['expense_category'] == selected_category]
+
+
+    # Filtrage par date
+    df_filtered['date_dt'] = pd.to_datetime(df_filtered['date'])
+    df_filtered = df_filtered[
+        (df_filtered['date_dt'] >= pd.to_datetime(min_filter)) & 
+        (df_filtered['date_dt'] <= pd.to_datetime(max_filter))
+    ]
+    df_filtered = df_filtered.drop(columns=['date_dt'])
+    
+    # Tri par date (du plus récent au plus ancien)
+    df_filtered = df_filtered.sort_values(by='date', ascending=False)
+
+    st.subheader(f"Résultats ({len(df_filtered)} opérations)")
+
+    # Mise en forme pour l'affichage
+    df_display = df_filtered.rename(columns={
+        'type': 'Type',
+        'expense_category': 'Catégorie Dép.',
+        'description': 'Description',
+        'amount': 'Montant (€)',
+        'date': 'Date',
+        'recorded_by': 'Enregistré par'
+        # 'doc_id' est retiré de l'affichage
+    })
+    
+    df_display['Montant (€)'] = df_display['Montant (€)'].apply(lambda x: f"{x:.2f}")
+
+    # Nettoyage des colonnes avant l'affichage
+    cols_to_display = ['Date', 'Type', 'Catégorie Dép.', 'Description', 'Montant (€)', 'Enregistré par']
+    df_display = df_display.reindex(columns=cols_to_display).fillna('') # Remplacer NaN par chaîne vide
+
+    st.dataframe(df_display, use_container_width=True)
+    
+    # Bouton d'exportation
+    csv = df_filtered.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Exporter les données filtrées (CSV)",
+        data=csv,
+        file_name=f'export_smmd_compta_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+        mime='text/csv',
+        type="secondary"
     )
 
-
-def user_dashboard():
-    """Affiche le tableau de bord de l'utilisateur standard."""
-    # S'assurer que house_id n'est pas l'ID factice de bootstrap
-    hid = st.session_state['house_id'] if st.session_state['house_id'] != 'bootstrap_house_id' else None
+def manage_categories_section(db):
+    """UI pour l'Admin pour ajouter et supprimer des catégories de dépenses."""
+    st.header("Gestion des Catégories de Dépenses")
     
-    if not hid:
-        st.warning("Vous devez être affecté à une maison pour accéder au tableau de bord. Veuillez contacter l'administrateur.")
-        return
-
-    role = st.session_state['role']
-    uid = st.session_state['user_id']
-    df = get_house_transactions(hid)
-    h_bal, p_bal = calculate_balances(df, uid) if not df.empty else (0.00, 0.00)
+    current_categories = get_expense_categories(db)
     
-    st.title(f"🏠 {get_house_name(hid)}")
-    
-    # Affichage des soldes
-    c1, c2 = st.columns(2)
-    c1.metric("Solde Maison", f"{h_bal} €", delta_color="normal")
-    
-    # Affichage conditionnel du solde personnel
-    if p_bal > 0:
-        # L'utilisateur a des avances en attente de remboursement
-        c2.metric("Vos Avances (en attente)", f"{p_bal} €", delta_color="inverse")
-    elif p_bal < 0:
-        # Ne devrait pas arriver, mais pour la sécurité
-        c2.metric("Vos Avances (erreur)", f"{p_bal} €", delta_color="inverse")
+    # --- Affichage des catégories existantes ---
+    st.subheader("Catégories Actuelles")
+    if current_categories:
+        # Afficher la liste comme un tableau simple ou une liste
+        st.markdown(f"**Total :** {len(current_categories)} catégories")
+        st.write(", ".join(sorted(current_categories)))
     else:
-        c2.metric("Vos Avances", "0.00 €", delta_color="off")
-        
-    tabs_titles = ["Recettes", "Dépenses", "Historique"]
-    if role == 'chef_de_maison': tabs_titles.insert(2, "Chef") # Insérer l'onglet Chef avant Historique
-    
-    tabs = st.tabs(tabs_titles)
-    
-    # Mapping des onglets aux fonctions
-    tab_functions = {
-        "Recettes": lambda: render_revenue_tab(hid, uid),
-        "Dépenses": lambda: render_expense_tab(hid, uid),
-        "Chef": lambda: render_chef_tab(hid, uid),
-        "Historique": lambda: render_transaction_history(df)
-    }
+        st.info("Aucune catégorie de dépense n'est encore définie.")
 
-    # Exécution de la fonction de l'onglet sélectionné
-    for i, title in enumerate(tabs_titles):
-        with tabs[i]:
-            # Ajout d'une gestion pour l'onglet Chef si l'utilisateur est chef_de_maison
-            if title == "Chef" and role == 'chef_de_maison':
-                render_chef_tab(hid, uid)
-            elif title == "Recettes":
-                render_revenue_tab(hid, uid)
-            elif title == "Dépenses":
-                render_expense_tab(hid, uid)
-            elif title == "Historique":
-                render_transaction_history(df)
-
-# ----------------------------------------------------
-# --- Définition de l'Interface Admin ---
-# ----------------------------------------------------
-def admin_interface():
-    st.header("👑 Admin")
-    t1, t2, t3 = st.tabs(["Utilisateurs", "Maisons", "Audit"])
+    st.markdown("---")
     
-    # ---------------------------
-    # T1: Utilisateurs (Création & Suppression)
-    # ---------------------------
-    with t1:
-        st.subheader("Créer un nouvel utilisateur")
-        with st.form("new_user"):
-            c1, c2, c3 = st.columns(3)
-            ti = c1.selectbox("Titre", TITLES)
-            fn = c2.text_input("Prénom")
-            ln = c3.text_input("Nom")
-            # Mot de passe par défaut pour le premier login (doit être changé)
-            pw = st.text_input(f"Mdp Temporaire (sera {DEFAULT_PASSWORD})", value=DEFAULT_PASSWORD, type="password") 
-            
-            houses = get_all_houses()
-            h_opts = {v['name']: k for k, v in houses.items()}
-            
-            role = st.selectbox("Rôle", ROLES)
-            house = st.selectbox("Maison", list(h_opts.keys()) if h_opts else ["-"])
-            
-            if st.form_submit_button("Créer"):
-                uname = f"{fn.lower()}_{ln.lower()}"
-                house_id = h_opts.get(house) if house != '-' else None
+    # --- Ajouter une catégorie ---
+    col_add, col_del = st.columns(2)
+    
+    with col_add:
+        st.subheader("Ajouter une catégorie")
+        with st.form("add_category_form", clear_on_submit=True):
+            new_category = st.text_input("Nom de la catégorie (ex: Loyer, Carburant)").strip()
+            add_submitted = st.form_submit_button("Ajouter la catégorie", type="primary")
 
-                if not fn or not ln:
-                    st.error("Le prénom et le nom sont requis.")
-                elif not house_id and role != 'admin':
-                    st.error("Une maison est requise pour tous les rôles sauf 'admin'.")
+            if add_submitted and new_category:
+                # Normalisation : première lettre en majuscule, reste en minuscule
+                new_category_normalized = new_category.capitalize()
+                
+                if new_category_normalized in current_categories:
+                    st.warning(f"La catégorie '{new_category_normalized}' existe déjà.")
                 else:
-                    try:
-                        # Assurez-vous que l'utilisateur n'existe pas déjà
-                        existing_user = db.collection(COL_USERS).document(uname).get().exists
-                        if existing_user:
-                             st.error(f"L'utilisateur {uname} existe déjà.")
-                        else:
-                            db.collection(COL_USERS).document(uname).set({
-                                'title': ti, 'first_name': fn, 'last_name': ln, 'username': uname,
-                                'password_hash': hash_password(pw), 
-                                'role': role, 
-                                'house_id': house_id,
-                                'must_change_password': True # Force le changement de mot de passe au premier login
-                            })
-                            get_all_users.clear()
-                            st.success(f"Créé: {uname}. Mot de passe temporaire: {DEFAULT_PASSWORD}")
-                            st.rerun()
-                    except Exception as e:
-                        st.error(f"Erreur de création: {e}")
+                    updated_categories = current_categories + [new_category_normalized]
+                    if save_expense_categories(db, updated_categories):
+                        st.success(f"Catégorie '{new_category_normalized}' ajoutée avec succès.")
+                        st.rerun()
+            elif add_submitted:
+                st.warning("Veuillez entrer un nom pour la catégorie.")
+    
+    # --- Supprimer une catégorie ---
+    with col_del:
+        st.subheader("Supprimer une catégorie")
+        if current_categories:
+            with st.form("delete_category_form", clear_on_submit=True):
+                category_to_delete = st.selectbox(
+                    "Sélectionnez la catégorie à supprimer",
+                    sorted(current_categories)
+                )
+                delete_submitted = st.form_submit_button("Supprimer la sélection", type="secondary")
 
-
-        st.markdown("---")
-        st.subheader("Supprimer un utilisateur")
-        all_users = get_all_users()
-        user_opts = {f"{u_data.get('first_name', 'N/A')} {u_data.get('last_name', 'N/A')} ({k})": k 
-                     for k, u_data in all_users.items()}
-        
-        if user_opts:
-            # S'assurer que la liste est affichée uniquement si elle n'est pas vide
-            user_to_delete_display = st.selectbox("Utilisateur à supprimer", list(user_opts.keys()), key="del_user_select")
-            user_to_delete_id = user_opts[user_to_delete_display]
-            
-            # Empêcher l'admin de se supprimer lui-même
-            if user_to_delete_id == st.session_state.get('user_id'):
-                st.warning("Vous ne pouvez pas supprimer votre propre compte.")
-            else:
-                if st.button(f"🗑️ Confirmer la suppression de l'utilisateur", key="del_user_btn"):
-                    delete_user(user_to_delete_id)
-                    st.rerun() 
+                if delete_submitted:
+                    updated_categories = [c for c in current_categories if c != category_to_delete]
+                    if save_expense_categories(db, updated_categories):
+                        st.success(f"Catégorie '{category_to_delete}' supprimée avec succès.")
+                        st.rerun()
         else:
-            st.info("Aucun utilisateur à supprimer.")
+            st.info("Rien à supprimer.")
 
 
-    # ---------------------------
-    # T2: Maisons (Création & Suppression)
-    # ---------------------------
-    with t2:
-        st.subheader("Créer une nouvelle maison")
-        with st.form("new_house"):
-            name = st.text_input("Nom Ville")
-            if st.form_submit_button("Créer"):
-                if name:
-                    hid = name.lower().replace(' ', '_').replace('-', '_')
-                    db.collection(COL_HOUSES).document(hid).set({'name': name})
-                    get_all_houses.clear()
-                    st.rerun()
-                else:
-                    st.error("Le nom de la maison est requis.")
+def admin_page():
+    """Page d'administration (pour les utilisateurs avec le rôle 'admin' ou 'chef')."""
+    user_role = st.session_state.user.get('role', 'inconnu')
+    st.title(f"Tableau de Bord {user_role.capitalize()} - {st.session_state.user.get('name')}")
+    st.markdown(f"**Rôle :** `{user_role}`")
 
-        st.markdown("---")
-        st.subheader("Supprimer une maison")
-        houses = get_all_houses()
-        h_opts = {v['name']: k for k, v in houses.items()}
+    db = get_db()
+    
+    # Récupère toutes les transactions une seule fois
+    df_transactions = get_transactions(db)
+
+    # Affiche l'allocation et le solde
+    col_info, col_logout = st.columns([3, 1])
+    
+    with col_info:
+        allocation = st.session_state.user.get('monthly_allocation', 'Non défini')
+        st.info(f"**Allocation mensuelle :** `{allocation} €`")
+
+    with col_logout:
+        st.button("Déconnexion", on_click=logout)
         
-        if h_opts:
-            house_to_delete_name = st.selectbox("Maison à supprimer", list(h_opts.keys()), key="del_house_select")
-            house_to_delete_id = h_opts[house_to_delete_name]
+    st.markdown("---")
+        
+    # Définition des onglets disponibles en fonction du rôle
+    available_tabs = ["📊 Opérations", "📚 Historique et Export", "⚙️ Paramètres & Gestion"]
+    
+    # Le chef (chef) n'a pas accès à la gestion des paramètres
+    if user_role == 'chef':
+        tab_op, tab_hist_export = st.tabs(available_tabs[:-1])
+    else: # admin
+        tab_op, tab_hist_export, tab_settings = st.tabs(available_tabs)
 
-            st.error("⚠️ Cette action est IRRÉVERSIBLE et ne supprime **PAS** les transactions liées dans Firestore. Vous devrez les supprimer manuellement ou les réaffecter.")
-
-            if st.button(f"🗑️ Confirmer la suppression de la maison '{house_to_delete_name}'", key="del_house_btn"):
-                delete_house(house_to_delete_id)
-        else:
-            st.info("Aucune maison à supprimer.")
-
-
-    # ---------------------------
-    # T3: Audit (Modification/Suppression des Transactions)
-    # ---------------------------
-    with t3:
-        st.subheader("Audit des Transactions et Opérations")
-
-        # 1. Récupération de TOUTES les transactions
-        all_tx_stream = db.collection(COL_TRANSACTIONS).stream()
-        all_tx = [d.to_dict() | {'doc_id': d.id} for d in all_tx_stream]
-
-        if not all_tx:
-            st.info("Aucune transaction enregistrée.")
-            return
-
-        df_all_tx = pd.DataFrame(all_tx)
+    # Saisie des opérations
+    with tab_op:
+        st.header("Saisie d'une Nouvelle Opération")
+        tab_recette, tab_depense, tab_avance = st.tabs(["💰 Recette", "💸 Dépense", "🤝 Avance"])
         
-        # Mapping pour l'affichage (récupère les caches existants)
-        house_map = {k: v['name'] for k, v in get_all_houses().items()}
-        all_users_data = get_all_users()
-        user_map = {k: f"{v.get('first_name', 'N/A')} {v.get('last_name', 'N/A')} ({v.get('username', 'N/A')})" for k, v in all_users_data.items()}
-        
-        df_all_tx['house_name'] = df_all_tx['house_id'].map(house_map).fillna('N/A')
-        df_all_tx['user_name'] = df_all_tx['user_id'].map(user_map).fillna('N/A')
-        
-        # Colonnes à afficher pour l'audit
-        display_cols = ['doc_id', 'created_at', 'house_name', 'user_name', 'type', 'amount', 'nature', 'payment_method', 'status']
-        st.dataframe(df_all_tx[display_cols], use_container_width=True, height=300)
-
-        # 2. Section Modification/Suppression
-        st.markdown("---")
-        st.subheader("Modifier / Supprimer une Transaction")
-        
-        # Création des options de sélection
-        # Utiliser 'doc_id' comme clé, mais afficher le résumé
-        tx_options = {f"{row['created_at'][:10]} - {row['nature']} ({row['amount']}€) - ID: {row['doc_id']}": row['doc_id'] 
-                      for _, row in df_all_tx.sort_values(by='created_at', ascending=False).iterrows()}
-        
-        selected_tx_key = st.selectbox(
-            "Sélectionner la Transaction", 
-            list(tx_options.keys()), 
-            key="audit_tx_select"
-        )
-        selected_doc_id = tx_options[selected_tx_key]
-        
-        # Récupérer les données de la transaction sélectionnée
-        selected_tx_data = df_all_tx[df_all_tx['doc_id'] == selected_doc_id].iloc[0].to_dict()
-        
-        st.caption(f"ID du Document sélectionné : `{selected_doc_id}`")
-        
-        # 2a. Formulaire de Modification
-        st.markdown("##### ✏️ Modification")
-        
-        # Définir toutes les options possibles (pour éviter les erreurs d'index)
-        ALL_TRANSACTION_TYPES = ['recette_mensuelle', 'recette_exceptionnelle', 'depense_maison', 'depense_avance']
-        ALL_STATUS = ['validé', 'en_attente_remboursement', 'remboursé']
-        
-        # S'assurer que les valeurs par défaut existent dans les listes d'options
-        default_type = selected_tx_data.get('type')
-        default_method = selected_tx_data.get('payment_method')
-        default_status = selected_tx_data.get('status', 'validé')
-
-        with st.form("edit_tx_form"):
-            c1, c2 = st.columns(2)
-            new_amount = c1.number_input("Montant (EUR)", value=float(selected_tx_data['amount']), format="%.2f", key="edit_amount")
-            new_nature = c2.text_input("Nature", value=selected_tx_data['nature'], key="edit_nature")
+        with tab_recette:
+            transaction_form_section(db, 'revenue')
             
-            c3, c4 = st.columns(2)
-            # Gestion des index des selectbox pour éviter les erreurs si la valeur n'est pas dans la liste
-            type_index = ALL_TRANSACTION_TYPES.index(default_type) if default_type in ALL_TRANSACTION_TYPES else 2
-            method_index = PAYMENT_METHODS.index(default_method) if default_method in PAYMENT_METHODS else 0
-            status_index = ALL_STATUS.index(default_status) if default_status in ALL_STATUS else 0
+        with tab_depense:
+            transaction_form_section(db, 'expense')
 
-            new_type = c3.selectbox("Type", ALL_TRANSACTION_TYPES, index=type_index, key="edit_type")
-            new_method = c4.selectbox("Moyen de Paiement", PAYMENT_METHODS, index=method_index, key="edit_method")
+        with tab_avance:
+            transaction_form_section(db, 'advance')
+
+    # Historique et Export
+    with tab_hist_export:
+        data_export_section(df_transactions)
+
+    # Gestion des Paramètres (Uniquement pour Admin)
+    if user_role == 'admin':
+        with tab_settings:
+            st.header("Gestion de l'Application")
             
-            new_status = st.selectbox("Statut", ALL_STATUS, index=status_index, key="edit_status")
+            # Gestion des Catégories de Dépenses
+            manage_categories_section(db)
             
-            if st.form_submit_button("Sauvegarder les Modifications", type="primary"):
-                update_data = {
-                    'amount': round(float(new_amount), 2),
-                    'nature': new_nature,
-                    'type': new_type,
-                    'payment_method': new_method,
-                    'status': new_status,
-                    'updated_at': datetime.now().isoformat()
-                }
-                update_transaction(selected_doc_id, update_data)
-                st.rerun()
-
-        # 2b. Bouton de Suppression
-        st.markdown("##### 🗑️ Suppression")
-        st.error(f"La suppression est définitive pour la transaction : {selected_doc_id}")
-        if st.button(f"Supprimer la Transaction sélectionnée ({selected_tx_data['nature']})", key="delete_tx_btn"):
-            delete_transaction(selected_doc_id) # Utilise la fonction existante
-            # st.rerun() est dans delete_transaction
+            st.markdown("---")
+            
+            # Gestion des Utilisateurs (WIP)
+            st.subheader("Gestion des Utilisateurs")
+            st.info("Cette section est en cours de développement. Elle permettra de créer, modifier et assigner des rôles aux utilisateurs.")
 
 
-# ----------------------------------------------------
-# --- Définition du Style CSS pour le bandeau rouge ---
-# ----------------------------------------------------
-def set_red_theme_band():
-    """Injecte du CSS pour colorer le bandeau supérieur en rouge."""
+# --- Fonction Principale ---
+
+def main():
+    """Fonction principale de l'application Streamlit."""
+
+    # Configuration de la page
+    st.set_page_config(page_title="SMMD Alsace", layout="wide", initial_sidebar_state="collapsed")
+
+    # Injecte le CSS pour le bandeau rouge (Personnalisation visuelle SMMD)
     st.markdown("""
-    <style>
-    /* Change la couleur de fond de la barre latérale */
-    [data-testid="stSidebar"] {
-        background-color: #f0f2f6; /* Laisse la barre latérale claire */
-    }
+        <style>
+        /* Couleurs et style pour le thème SMMD Alsace */
+        .st-emotion-cache-1gsv2z, .st-emotion-cache-15zrmu {
+            background-color: #A30000; /* Rouge SMMD pour le header/navbar */
+            color: white;
+        }
+        .st-emotion-cache-1n60912 a {
+            color: white !important;
+        }
+        .st-emotion-cache-1gsv2z {
+            padding-top: 15px !important;
+            padding-bottom: 15px !important;
+        }
+        h1 {
+            color: #A30000; /* Titres en rouge SMMD */
+        }
+        /* Style pour les boutons primaires (connexion et enregistrement) */
+        .st-emotion-cache-czk5ad { 
+            background-color: #A30000;
+            border-color: #A30000;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
-    /* Change la couleur de fond du bandeau principal (où se trouve le hamburger menu) */
-    [data-testid="stHeader"] {
-        background-color: #FF4B4B; /* Rouge vif de Streamlit */
-    }
-    /* S'assurer que le texte/logo dans le bandeau reste visible */
-    [data-testid="stHeader"] .st-emotion-cache-18ni91u, 
-    [data-testid="stHeader"] .st-emotion-cache-12qukfr {
-        color: white; 
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    # Assure que l'état de session existe
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+        st.session_state['user'] = {}
 
+    # Tente d'initialiser la DB
+    db = get_db()
 
-# ----------------------------------------------------
-# --- Main Loop (Démarrage de l'Application) ---
-# ----------------------------------------------------
-if __name__ == '__main__':
-    st.set_page_config(page_title="Compta Smmd", page_icon="💰", layout="wide")
-    
-    # 🎨 Appel du style pour le bandeau rouge
-    set_red_theme_band() 
-    
-    if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
-    
+    if db is None:
+        # Si Firebase n'a pas pu être initialisé, affiche un message d'erreur
+        st.stop()
+
+    # Logique de routage
     if st.session_state.get('logged_in'):
-        # Barre latérale pour la déconnexion
-        with st.sidebar:
-            st.write(f"Connecté: {st.session_state['user_data'].get('first_name')} ({st.session_state['role']})")
-            if st.button("Déconnexion", key="sidebar_logout"): logout()
-
-        # Vérifie si le mot de passe doit être changé
-        if st.session_state.get('must_change_password', False) and st.session_state.get('user_id') != 'admin':
-            # Empêche l'affichage du tableau de bord tant que le mot de passe n'est pas changé
-            password_reset_interface(st.session_state['user_id'])
-            
-        elif st.session_state['role'] == 'admin':
-            admin_interface()
+        user_data = st.session_state.user
+        user_role = user_data.get('role')
+        
+        # 1. Vérification de la configuration initiale (allocation mensuelle)
+        is_setup_complete = user_data.get('monthly_allocation') is not None
+        
+        if not is_setup_complete:
+            # Si l'allocation n'est pas définie, afficher la page de configuration
+            setup_allocation_page(db, user_data)
+        
+        # 2. Routage normal si la configuration est complète
+        # L'admin_page gère maintenant les rôles 'admin' et 'chef'
+        elif user_role in ['admin', 'chef']:
+            admin_page()
         else:
-            user_dashboard()
-            
+            # Pour les rôles inconnus
+            st.error("Accès non autorisé pour ce rôle.")
+            st.button("Déconnexion", on_click=logout)
     else:
-        # Interface de Connexion
-        st.title("Connexion")
-        u = st.text_input("Nom d'utilisateur (prenom_nom)")
-        p = st.text_input("Mot de passe", type="password")
-        if st.button("Se connecter", key="login_btn"):
-            if authenticate_user(u, p): 
-                st.toast("Connexion réussie !", icon='🥳')
-                st.rerun()
-            else: 
-                st.error("Nom d'utilisateur ou mot de passe incorrect.")
+        login_page()
+
+
+if __name__ == '__main__':
+    main()
