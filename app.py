@@ -290,7 +290,7 @@ def set_monthly_allocation(user_id, house_id, amount):
     """
     Définit ou met à jour l'allocation mensuelle d'un utilisateur (pour le mois en cours et les suivants).
     
-    Cette fonction met à jour le taux dans COL_ALLOCATIONS (reporté) et met à jour/crée 
+    Cette fonction met à jour le taux dans COL_ALLOCATIONS (valeur reportée) et met à jour/crée 
     la transaction de recette pour le mois en cours (effet immédiat sur le solde).
     """
     try:
@@ -417,11 +417,13 @@ def display_extraction_results(df_filtered, start_date_filter, end_date_filter, 
         'house_id': 'Maison ID'
     })
     
-    cols_to_display = ['Date', 'Description', 'Catégorie', 'Montant (€)', 'Type', 'Utilisateur ID', 'Méthode', 'Statut']
+    # NOUVEL ORDRE DES COLONNES POUR L'EXTRACTION CSV et l'affichage des détails
+    cols_to_display = ['Date', 'Type', 'Montant (€)', 'Description', 'Catégorie', 'Utilisateur ID', 'Méthode', 'Statut']
     
     st.dataframe(export_df[cols_to_display], use_container_width=True, hide_index=True)
 
     # Bouton d'export
+    # Le fichier CSV utilise maintenant l'ordre ci-dessus (cols_to_display)
     csv_export = export_df[cols_to_display].to_csv(index=False).encode('utf-8')
     st.download_button(
         label="Télécharger les données filtrées (CSV)",
@@ -668,7 +670,8 @@ def user_dashboard():
                     st.info("Cette dépense diminue directement le solde de la maison.")
                 else:
                     tx_type = 'depense_avance'
-                    payment_options = ['carte', 'chèque', 'liquide', 'virement'] # Choix utilisateur pour l'avance
+                    # Changement ici : Paiement sur Fonds Personnel limité à CB, Chèque ou Liquide
+                    payment_options = ['carte', 'chèque', 'liquide'] 
                     payment_method = st.selectbox("Méthode de Paiement Personnel", payment_options, key="method_depense_perso")
                     st.warning("Ceci est une Avance de Fonds. Un remboursement par la maison est dû.")
             
@@ -731,6 +734,7 @@ def user_dashboard():
             'status': 'Statut'
         })
         
+        # Colonnes pour l'affichage du tableau de bord (ordre inchangé ici)
         cols_to_display = ['Date', 'Description', 'Catégorie', 'Montant', 'Type', 'Par', 'Méthode', 'Statut', 'doc_id']
         st.dataframe(display_df[cols_to_display].head(10), use_container_width=True, hide_index=True)
 
