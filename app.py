@@ -13,7 +13,7 @@ from functools import lru_cache
 
 # Ces ID correspondent aux noms de collection à la racine de Firestore
 COL_TRANSACTIONS = 'smmd_transactions'
-COL_HOUSES = 'smmd_houses'
+COL_HOUSES = 'smmd_houses' # Collection pour les Maisons (anciennement Foyers)
 COL_USERS = 'smmd_users'
 COL_ALLOCATIONS = 'smmd_allocations' 
 COL_CATEGORIES = 'smmd_categories' 
@@ -27,7 +27,7 @@ DEFAULT_PASSWORD = "first123"
 
 # Mappage des types de transaction pour l'affichage dans l'interface utilisateur
 TX_TYPE_MAP = {
-    'depense_commune': 'Dépense Commune (Fonds Foyer)',
+    'depense_commune': 'Dépense Commune (Fonds Maison)',
     'depense_avance': 'Avance de Fonds (Remboursement requis)',
     'recette_mensuelle': 'Recette (Allocation Mensuelle)',
     'recette_exceptionnelle': 'Recette Exceptionnelle',
@@ -196,10 +196,10 @@ def delete_user(user_id):
         return False
 
 def delete_house(house_id):
-    """Supprime un foyer."""
+    """Supprime une maison (anciennement foyer)."""
     try:
         # 1. Mettre à jour les utilisateurs associés à 'INCONNU'
-        # Pour éviter des erreurs si on tente de supprimer le foyer sans avoir corrigé les utilisateurs
+        # Pour éviter des erreurs si on tente de supprimer la maison sans avoir corrigé les utilisateurs
         users_to_update = db.collection(COL_USERS).where('house_id', '==', house_id).stream()
         batch = db.batch()
         for user_doc in users_to_update:
@@ -209,12 +209,12 @@ def delete_house(house_id):
         # 2. Supprimer la maison
         db.collection(COL_HOUSES).document(house_id).delete()
         
-        st.toast(f"Foyer {house_id} supprimé. Les utilisateurs associés ont été mis à jour.", icon='🗑️')
+        st.toast(f"Maison {house_id} supprimée. Les utilisateurs associés ont été mis à jour.", icon='🗑️')
         get_all_houses.clear()
         get_all_users.clear() # Le cache utilisateur doit être effacé car des house_id ont changé
         return True
     except Exception as e:
-        st.error(f"Erreur de suppression de foyer : {e}")
+        st.error(f"Erreur de suppression de maison : {e}")
         return False
 
 def save_category(category_id, name):
@@ -287,16 +287,23 @@ def delete_transaction(doc_id):
     except Exception as e: st.error(f"Erreur de suppression de transaction : {e}")
     
 def set_monthly_allocation(user_id, house_id, amount):
-    """Définit ou met à jour l'allocation mensuelle d'un utilisateur et crée/met à jour la recette correspondante."""
+    """
+    Définit ou met à jour l'allocation mensuelle d'un utilisateur (pour le mois en cours et les suivants).
+    
+    Cette fonction met à jour le taux dans COL_ALLOCATIONS (reporté) et met à jour/crée 
+    la transaction de recette pour le mois en cours (effet immédiat sur le solde).
+    """
     try:
         amount = round(float(amount), 2)
-        # 1. Mettre à jour l'enregistrement d'allocation pour l'utilisateur
+        
+        # 1. Mettre à jour l'enregistrement d'allocation pour l'utilisateur (valeur reportée)
         db.collection(COL_ALLOCATIONS).document(user_id).set({'amount': amount, 'house_id': house_id, 'updated': datetime.now().isoformat()})
         
         # 2. Mettre à jour ou créer la transaction de 'recette_mensuelle' pour le mois en cours
         current_month = datetime.now().strftime('%Y-%m')
         user_name = st.session_state['user_data'].get('first_name', user_id)
         
+        # Trouver la transaction d'allocation pour ce mois
         q = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).where('month_year', '==', current_month).where('type', '==', 'recette_mensuelle').limit(1).stream()
         existing_tx = next(q, None)
         
@@ -304,11 +311,13 @@ def set_monthly_allocation(user_id, house_id, amount):
         category_id_for_revenue = 'allocation_mensuelle' 
         
         if existing_tx:
+            # Mettre à jour le montant de la transaction existante
             db.collection(COL_TRANSACTIONS).document(existing_tx.id).update({'amount': amount})
         else:
+            # Créer la transaction si elle n'existe pas pour ce mois
             save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Allocation Mensuelle de {user_name} (Mois en cours)", category_id_for_revenue, payment_method='virement')
             
-        st.toast(f"Allocation mensuelle mise à jour à {amount}€ pour ce mois.", icon="💸")
+        st.toast(f"Allocation mensuelle mise à jour à {amount}€ pour ce mois et les suivants.", icon="💸")
         get_house_transactions.clear() 
         return True
     except Exception as e: st.error(f"Erreur lors de la mise à jour de l'allocation: {e}")
@@ -355,7 +364,7 @@ def filter_transactions_by_period(df, start_date=None, end_date=None):
 def display_extraction_results(df_filtered, start_date_filter, end_date_filter, period_name, house_id):
     """Affiche les résultats de l'extraction avec séparation des recettes et dépenses."""
     
-    st.subheader(f"Transactions du Foyer pour la période : {period_name} ({start_date_filter} au {end_date_filter})")
+    st.subheader(f"Transactions de la Maison pour la période : {period_name} ({start_date_filter} au {end_date_filter})")
     
     if df_filtered.empty:
         st.warning("Aucune transaction trouvée pour cette période.")
@@ -405,7 +414,7 @@ def display_extraction_results(df_filtered, start_date_filter, end_date_filter, 
         'user_id': 'Utilisateur ID',
         'payment_method': 'Méthode',
         'status': 'Statut',
-        'house_id': 'Foyer ID'
+        'house_id': 'Maison ID'
     })
     
     cols_to_display = ['Date', 'Description', 'Catégorie', 'Montant (€)', 'Type', 'Utilisateur ID', 'Méthode', 'Statut']
@@ -424,12 +433,12 @@ def display_extraction_results(df_filtered, start_date_filter, end_date_filter, 
 
 def house_manager_extraction_interface(house_id):
     """Interface d'extraction de données pour le Chef de Maison."""
-    st.header("📊 Extraction et Analyse des Transactions du Foyer")
+    st.header("📊 Extraction et Analyse des Transactions de la Maison")
     
     df_all_tx = get_house_transactions(house_id)
     
     if df_all_tx.empty:
-        st.info("Aucune transaction n'a encore été enregistrée pour ce foyer pour l'extraction.")
+        st.info("Aucune transaction n'a encore été enregistrée pour cette maison pour l'extraction.")
         return
 
     if 'created_at_dt' not in df_all_tx.columns:
@@ -559,19 +568,47 @@ def user_dashboard():
     st.header(f"Bonjour, {user_data.get('first_name', 'Utilisateur')}!")
     
     is_house_manager = st.session_state['role'] == 'chef_de_maison'
+    is_user_or_manager = st.session_state['role'] in ['utilisateur', 'chef_de_maison']
 
     if is_house_manager:
         with st.expander("👑 Outils d'Extraction pour Chef de Maison", expanded=False):
             house_manager_extraction_interface(house_id)
         st.markdown("---")
+        
+    # --- Interface de Gestion d'Allocation pour Utilisateurs/Chefs de Maison ---
+    if is_user_or_manager:
+        # Récupérer l'allocation actuelle de l'utilisateur
+        allocation_doc = db.collection(COL_ALLOCATIONS).document(user_id).get()
+        current_allocation_amount = allocation_doc.to_dict().get('amount', 0.00) if allocation_doc.exists else 0.00
 
+        with st.expander("💸 Ma Gestion d'Allocation Mensuelle", expanded=False):
+            st.subheader(f"Allocation Mensuelle Actuelle : {current_allocation_amount:,.2f} €")
+            st.info("Cette allocation sera reportée pour tous les mois suivants. Toute modification ajustera également la recette du mois en cours.")
+            
+            with st.form("user_allocation_form", clear_on_submit=False):
+                new_allocation_amount = st.number_input(
+                    "Définir/Modifier mon Allocation Mensuelle (€)", 
+                    min_value=0.00, 
+                    value=current_allocation_amount, 
+                    format="%.2f", 
+                    key="user_allocation_input"
+                )
+                
+                if st.form_submit_button("Sauvegarder mon Allocation", type="primary"):
+                    if new_allocation_amount >= 0:
+                        set_monthly_allocation(user_id, house_id, new_allocation_amount)
+                        st.rerun()
+                    else:
+                        st.error("Le montant de l'allocation doit être positif ou nul.")
+
+    # --- Affichage des soldes (inchangé) ---
     df_transactions = get_house_transactions(house_id)
     house_balance, user_balance = calculate_balances(df_transactions, user_id)
 
     col_h_bal, col_u_bal = st.columns(2)
     
     with col_h_bal:
-        st.metric(label="Solde du Foyer (Total)", 
+        st.metric(label="Solde de la Maison (Total)", 
                   value=f"{house_balance:,.2f} €", 
                   delta="Solde net (Recettes - Dépenses)",
                   delta_color="normal")
@@ -616,7 +653,7 @@ def user_dashboard():
                 funding_type = st.radio(
                     "Comment la dépense a-t-elle été payée ?", 
                     options=[
-                        'Fonds du Foyer (CB Maison, Virement Foyer)', 
+                        'Fonds de la Maison (CB Maison, Virement Maison)', 
                         'Fonds Personnel (Avance, Remboursement requis)'
                     ],
                     key="funding_type_radio"
@@ -624,10 +661,10 @@ def user_dashboard():
                 
             with col4:
                 # Détermine les options de paiement en fonction du choix
-                if 'Fonds du Foyer' in funding_type:
+                if 'Fonds de la Maison' in funding_type:
                     tx_type = 'depense_commune'
                     payment_options = ['carte', 'virement', 'autre']
-                    payment_method = st.selectbox("Méthode de Paiement du Foyer", payment_options, key="method_depense_foyer")
+                    payment_method = st.selectbox("Méthode de Paiement de la Maison", payment_options, key="method_depense_foyer")
                     st.info("Cette dépense diminue directement le solde de la maison.")
                 else:
                     tx_type = 'depense_avance'
@@ -702,7 +739,7 @@ def admin_interface():
     """Affiche l'interface Admin pour la gestion des utilisateurs, des maisons et des catégories."""
     st.title("👑 Panneau d'Administration")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Gestion Utilisateurs", "Gestion Foyers", "Paramètres Allocation", "Gestion Catégories"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Gestion Utilisateurs", "Gestion Maisons", "Paramètres Allocation", "Gestion Catégories"])
     
     # --- TAB 1: GESTION UTILISATEURS ---
     with tab1:
@@ -740,7 +777,8 @@ def admin_interface():
             with col_u3:
                 title = st.selectbox("Titre", TITLES)
                 available_houses = get_all_houses()
-                house_id = st.selectbox("Foyer Associé", available_houses.keys(), format_func=get_house_name, disabled=not available_houses)
+                # Remplacement "Foyer Associé" par "Maison Associée"
+                house_id = st.selectbox("Maison Associée", available_houses.keys(), format_func=get_house_name, disabled=not available_houses)
                 
             if st.form_submit_button("Créer l'Utilisateur", type="primary"):
                 if not new_uid or not first_name or not last_name:
@@ -748,7 +786,8 @@ def admin_interface():
                 elif db.collection(COL_USERS).document(new_uid).get().exists:
                     st.error("Cet ID Utilisateur existe déjà.")
                 elif not available_houses:
-                    st.error("Vous devez créer au moins un Foyer avant d'ajouter un utilisateur.")
+                    # Remplacement "Foyer" par "Maison"
+                    st.error("Vous devez créer au moins une Maison avant d'ajouter un utilisateur.")
                 else:
                     new_user_data = {
                         'first_name': first_name,
@@ -768,9 +807,9 @@ def admin_interface():
                     except Exception as e:
                         st.error(f"Erreur de création: {e}")
 
-    # --- TAB 2: GESTION FOYERS ---
+    # --- TAB 2: GESTION MAISONS ---
     with tab2:
-        st.header("Foyers Actuels")
+        st.header("Maisons Actuelles")
         houses = get_all_houses()
         
         if houses:
@@ -778,31 +817,34 @@ def admin_interface():
             st.dataframe(houses_df, use_container_width=True)
 
             st.markdown("---")
-            st.subheader("Supprimer un Foyer")
+            st.subheader("Supprimer une Maison")
             col_del, col_space = st.columns([1, 2])
             with col_del:
-                house_to_delete = st.selectbox("ID Foyer à Supprimer", houses.keys(), key="del_house_select")
+                # Remplacement "ID Foyer" par "ID Maison"
+                house_to_delete = st.selectbox("ID Maison à Supprimer", houses.keys(), key="del_house_select")
                 
                 if st.button(f"Confirmer la Suppression de {house_to_delete}", key="confirm_del_house", type="secondary"):
                     delete_house(house_to_delete)
         else:
-            st.info("Aucun foyer enregistré.")
+            st.info("Aucune maison enregistrée.")
 
         st.markdown("---")
-        st.subheader("Ajouter un Nouveau Foyer")
+        st.subheader("Ajouter une Nouvelle Maison")
         with st.form("new_house_form", clear_on_submit=True):
-            house_id = st.text_input("ID Foyer (Unique)")
-            house_name = st.text_input("Nom du Foyer (Ex: Maison Bleue)")
+            # Remplacement "ID Foyer" par "ID Maison"
+            house_id = st.text_input("ID Maison (Unique)")
+            # Remplacement "Nom du Foyer" par "Nom de la Maison"
+            house_name = st.text_input("Nom de la Maison (Ex: Maison Bleue)")
             
-            if st.form_submit_button("Créer le Foyer", type="primary"):
+            if st.form_submit_button("Créer la Maison", type="primary"):
                 if not house_id or not house_name:
-                    st.error("L'ID et le Nom du Foyer sont obligatoires.")
+                    st.error("L'ID et le Nom de la Maison sont obligatoires.")
                 elif db.collection(COL_HOUSES).document(house_id).get().exists:
-                    st.error("Cet ID de Foyer existe déjà.")
+                    st.error("Cet ID de Maison existe déjà.")
                 else:
                     try:
                         db.collection(COL_HOUSES).document(house_id).set({'name': house_name, 'created_at': datetime.now().isoformat()})
-                        st.success(f"Foyer '{house_name}' créé.")
+                        st.success(f"Maison '{house_name}' créée.")
                         get_all_houses.clear()
                         st.rerun()
                     except Exception as e:
@@ -811,7 +853,7 @@ def admin_interface():
     # --- TAB 3: PARAMÈTRES ALLOCATION ---
     with tab3:
         st.header("Définir l'Allocation Mensuelle")
-        st.info("Cette allocation sera utilisée pour générer ou mettre à jour la recette mensuelle de l'utilisateur.")
+        st.info("Cette allocation sera utilisée pour générer ou mettre à jour la recette mensuelle de l'utilisateur. Elle sera reportée pour tous les mois suivants.")
         
         users = get_all_users()
         user_ids = list(users.keys())
@@ -832,7 +874,8 @@ def admin_interface():
                     set_monthly_allocation(selected_user_id, users[selected_user_id]['house_id'], allocation_amount)
                     st.rerun()
                 else:
-                    st.error("Veuillez vérifier que l'utilisateur a un foyer associé.")
+                    # Remplacement "foyer" par "maison"
+                    st.error("Veuillez vérifier que l'utilisateur a une maison associée.")
         else:
             st.warning("Aucun utilisateur à configurer. Créez un utilisateur d'abord.")
             
@@ -970,7 +1013,7 @@ def authentication_and_main_flow():
         st.sidebar.markdown(f"""
             **Connecté en tant que :** {st.session_state['user_data'].get('first_name')} 
             **Rôle :** {st.session_state['role'].capitalize()} 
-            **Foyer :** {get_house_name(st.session_state['house_id'])}
+            **Maison :** {get_house_name(st.session_state['house_id'])}
         """)
         st.sidebar.markdown("---")
 
