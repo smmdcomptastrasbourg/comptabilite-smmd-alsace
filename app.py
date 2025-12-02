@@ -371,8 +371,10 @@ def user_dashboard():
             
             col1, col2 = st.columns(2)
             with col1:
-                nature = st.text_input("Nature de la Transaction (ex: Courses alimentaires, Loyer, Câble)", required=True)
-                amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f", required=True)
+                # CORRECTION: Suppression de l'argument 'required=True'
+                nature = st.text_input("Nature de la Transaction (ex: Courses alimentaires, Loyer, Câble)")
+                # CORRECTION: Suppression de l'argument 'required=True'
+                amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f")
             with col2:
                 tx_type = st.radio("Type de Mouvement", 
                                    options=['depense', 'recette_mensuelle', 'depense_avance', 'remboursement'], 
@@ -383,8 +385,11 @@ def user_dashboard():
             notes = st.text_area("Notes additionnelles (facultatif)")
             
             if st.form_submit_button("Enregistrer la Transaction", type="primary"):
+                # VALIDATION MANUELLE
+                if not nature or amount is None or amount <= 0:
+                    st.error("Veuillez remplir la nature et spécifier un montant valide.")
                 # Simuler la logique de 'recette_mensuelle' pour ne pas la laisser manuelle
-                if tx_type == 'recette_mensuelle':
+                elif tx_type == 'recette_mensuelle':
                     st.error("La 'Recette Mensuelle' est gérée via l'allocation (section Admin/Chef de Maison). Veuillez choisir Dépense, Avance ou Remboursement.")
                 else:
                     save_transaction(house_id, user_id, tx_type, amount, nature, payment_method, notes)
@@ -453,10 +458,13 @@ def admin_interface():
         with st.form("new_user_form", clear_on_submit=True):
             col_u1, col_u2, col_u3 = st.columns(3)
             with col_u1:
-                new_uid = st.text_input("ID Utilisateur (Login)", required=True)
-                first_name = st.text_input("Prénom", required=True)
+                # CORRECTION: Suppression de l'argument 'required=True'
+                new_uid = st.text_input("ID Utilisateur (Login)") 
+                # CORRECTION: Suppression de l'argument 'required=True'
+                first_name = st.text_input("Prénom")
             with col_u2:
-                last_name = st.text_input("Nom", required=True)
+                # CORRECTION: Suppression de l'argument 'required=True'
+                last_name = st.text_input("Nom")
                 role = st.selectbox("Rôle", ROLES)
             with col_u3:
                 title = st.selectbox("Titre", TITLES)
@@ -465,7 +473,10 @@ def admin_interface():
                 house_id = st.selectbox("Foyer Associé", available_houses.keys(), format_func=get_house_name, disabled=not available_houses)
                 
             if st.form_submit_button("Créer l'Utilisateur", type="primary"):
-                if db.collection(COL_USERS).document(new_uid).get().exists:
+                # VALIDATION MANUELLE
+                if not new_uid or not first_name or not last_name:
+                    st.error("L'ID Utilisateur, le Prénom et le Nom sont obligatoires.")
+                elif db.collection(COL_USERS).document(new_uid).get().exists:
                     st.error("Cet ID Utilisateur existe déjà.")
                 elif not available_houses:
                     st.error("Vous devez créer au moins un Foyer avant d'ajouter un utilisateur.")
@@ -512,11 +523,16 @@ def admin_interface():
         st.markdown("---")
         st.subheader("Ajouter un Nouveau Foyer")
         with st.form("new_house_form", clear_on_submit=True):
-            house_id = st.text_input("ID Foyer (Unique)", required=True)
-            house_name = st.text_input("Nom du Foyer (Ex: Maison Bleue)", required=True)
+            # CORRECTION: Suppression de l'argument 'required=True'
+            house_id = st.text_input("ID Foyer (Unique)")
+            # CORRECTION: Suppression de l'argument 'required=True'
+            house_name = st.text_input("Nom du Foyer (Ex: Maison Bleue)")
             
             if st.form_submit_button("Créer le Foyer", type="primary"):
-                if db.collection(COL_HOUSES).document(house_id).get().exists:
+                # VALIDATION MANUELLE
+                if not house_id or not house_name:
+                    st.error("L'ID et le Nom du Foyer sont obligatoires.")
+                elif db.collection(COL_HOUSES).document(house_id).get().exists:
                     st.error("Cet ID de Foyer existe déjà.")
                 else:
                     try:
