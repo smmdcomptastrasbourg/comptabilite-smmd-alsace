@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import json
 from firebase_admin import initialize_app, credentials, firestore, exceptions
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import pandas as pd
 import bcrypt
 from functools import lru_cache 
@@ -20,7 +20,7 @@ COL_ALLOCATIONS = 'smmd_allocations'
 # Liste des méthodes de paiement et des rôles pour les formulaires
 PAYMENT_METHODS = ['carte', 'virement', 'liquide', 'autre']
 ROLES = ['admin', 'utilisateur', 'chef_de_maison']
-TITLES = ['M.', 'Mme', 'Abbé']
+TITLES = ['Frère', 'Abbé']
 # Le mot de passe par défaut pour les nouveaux utilisateurs
 DEFAULT_PASSWORD = "first123" 
 
@@ -313,6 +313,34 @@ def delete_house(house_id):
     except Exception as e: 
         st.error(f"Erreur de suppression de maison: {e}")
         return False
+        
+        
+# -------------------------------------------------------------------
+# --- NOUVELLES FONCTIONS D'EXTRACTION DE DONNÉES (CHEF DE MAISON)
+# -------------------------------------------------------------------
+
+def filter_transactions_by_period(df, start_date=None, end_date=None):
+    """Filtre un DataFrame de transactions par date."""
+    if df.empty:
+        return df
+        
+    df_filtered = df.copy()
+    
+    # Assurer que la colonne de datetime est présente pour le filtrage
+    if 'created_at_dt' not in df_filtered.columns:
+        df_filtered['created_at_dt'] = pd.to_datetime(df_filtered['created_at'])
+
+    if start_date:
+        # Le filtre doit inclure toutes les transactions à partir du début de la date de début
+        df_filtered = df_filtered[df_filtered['created_at_dt'] >= pd.to_datetime(start_date)]
+    
+    if end_date:
+        # Le filtre doit inclure toutes les transactions jusqu'à la fin de la date de fin
+        # On ajoute un jour pour inclure la journée entière de la date de fin
+        end_date_inclusive = pd.to_datetime(end_date) + timedelta(days=1) - timedelta(seconds=1)
+        df_filtered = df_filtered[df_filtered['created_at_dt'] <= end_date_inclusive]
+        
+    return df_filtered.sort_values(by='created_at_dt', ascending=False)
 
 
 # -------------------------------------------------------------------
@@ -351,6 +379,134 @@ def password_reset_interface(user_id):
             except Exception as e:
                 st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
 
+def house_manager_extraction_interface(house_id):
+    """Interface d'extraction de données pour le Chef de Maison."""
+    st.header("📊 Extraction et Analyse des Transactions du Foyer")
+    
+    df_all_tx = get_house_transactions(house_id)
+    
+    if df_all_tx.empty:
+        st.info("Aucune transaction n'a encore été enregistrée pour ce foyer pour l'extraction.")
+        return
+
+    # S'assurer que la colonne est au format datetime pour le filtrage
+    if 'created_at_dt' not in df_all_tx.columns:
+        df_all_tx['created_at_dt'] = pd.to_datetime(df_all_tx['created_at'])
+
+    # Déterminer les dates min/max pour les widgets
+    min_date = df_all_tx['created_at_dt'].min().date()
+    max_date = df_all_tx['created_at_dt'].max().date()
+    
+    st.subheader("Choisir la Période d'Analyse")
+    
+    # 1. Sélection du type de filtre
+    filter_type = st.radio(
+        "Type de Filtre", 
+        ['Période Personnalisée', 'Par Mois', 'Par Trimestre'], 
+        horizontal=True
+    )
+    
+    # Initialisation des dates de filtre
+    start_date_filter = None
+    end_date_filter = None
+    
+    # 2. Widgets de sélection de période
+    if filter_type == 'Période Personnalisée':
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date_filter = st.date_input("Date de Début", value=min_date, min_value=min_date, max_value=max_date)
+        with col_end:
+            end_date_filter = st.date_input("Date de Fin", value=max_date, min_value=min_date, max_value=max_date)
+        
+        if start_date_filter > end_date_filter:
+            st.error("La date de début ne peut pas être postérieure à la date de fin.")
+            return
+
+    elif filter_type == 'Par Mois':
+        # Extraction de tous les mois/années uniques pour le sélecteur
+        df_all_tx['month_str'] = df_all_tx['created_at_dt'].dt.strftime('%Y-%m')
+        unique_months = sorted(df_all_tx['month_str'].unique(), reverse=True)
+        
+        if not unique_months:
+             st.info("Aucune transaction avec date enregistrée.")
+             return
+
+        selected_month_str = st.selectbox("Sélectionner un Mois (AAAA-MM)", unique_months)
+        
+        # Déterminer les dates de début/fin pour le mois sélectionné
+        selected_month = datetime.strptime(selected_month_str, '%Y-%m')
+        start_date_filter = selected_month.date()
+        # Calculer le dernier jour du mois
+        if selected_month.month == 12:
+            end_date_filter = date(selected_month.year, 12, 31)
+        else:
+            end_date_filter = date(selected_month.year, selected_month.month + 1, 1) - timedelta(days=1)
+            
+    elif filter_type == 'Par Trimestre':
+        df_all_tx['year'] = df_all_tx['created_at_dt'].dt.year
+        df_all_tx['quarter'] = df_all_tx['created_at_dt'].dt.to_period('Q')
+        
+        unique_quarters = sorted(df_all_tx['quarter'].unique(), reverse=True)
+        
+        if not unique_quarters:
+             st.info("Aucune transaction avec date enregistrée.")
+             return
+             
+        selected_quarter = st.selectbox("Sélectionner un Trimestre", unique_quarters, format_func=lambda x: f"{x.year} T{x.quarter}")
+        
+        # Déterminer les dates de début/fin pour le trimestre sélectionné
+        start_date_filter = selected_quarter.start_time.date()
+        end_date_filter = selected_quarter.end_time.date()
+
+
+    # 3. Filtrage et affichage
+    if start_date_filter and end_date_filter:
+        df_filtered = filter_transactions_by_period(df_all_tx, start_date_filter, end_date_filter)
+        
+        st.markdown("---")
+        st.subheader(f"Transactions du Foyer du {start_date_filter} au {end_date_filter}")
+        
+        if df_filtered.empty:
+            st.warning("Aucune transaction trouvée pour cette période.")
+        else:
+            # Calculer le solde pour la période filtrée
+            house_balance_filtered, _ = calculate_balances(df_filtered, st.session_state['user_id'])
+            
+            # Affichage du solde de la période
+            st.metric(
+                label=f"Solde de la Période Sélectionnée ({filter_type})", 
+                value=f"{house_balance_filtered:,.2f} €",
+                delta="Recettes - Dépenses pour la période"
+            )
+
+            # Préparation du DataFrame pour l'affichage/export
+            display_df = df_filtered.copy()
+            display_df['Montant (€)'] = display_df['amount'].apply(lambda x: f"{x:,.2f}")
+            display_df['Date'] = display_df['created_at_dt'].dt.strftime('%d/%m/%Y %H:%M')
+            display_df['Type'] = display_df['type'].str.replace('_', ' ').str.capitalize()
+            
+            export_df = display_df.rename(columns={
+                'nature': 'Description',
+                'user_id': 'Utilisateur ID',
+                'payment_method': 'Méthode',
+                'status': 'Statut',
+                'house_id': 'Foyer ID'
+            })
+            
+            cols_to_display = ['Date', 'Description', 'Montant (€)', 'Type', 'Utilisateur ID', 'Méthode', 'Statut']
+            st.dataframe(export_df[cols_to_display], use_container_width=True, hide_index=True)
+
+            # Bouton d'export
+            csv_export = export_df[cols_to_display].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Télécharger les données filtrées (CSV)",
+                data=csv_export,
+                file_name=f'transactions_{house_id}_{start_date_filter}_a_{end_date_filter}.csv',
+                mime='text/csv',
+                type="primary"
+            )
+
+
 def user_dashboard(): 
     """Affiche le tableau de bord de l'utilisateur pour la gestion des dépenses."""
     user_data = st.session_state['user_data']
@@ -360,8 +516,17 @@ def user_dashboard():
     
     st.title(f"🏠 Gestion pour {house_name}")
     st.header(f"Bonjour, {user_data.get('first_name', 'Utilisateur')}!")
+    
+    is_house_manager = st.session_state['role'] == 'chef_de_maison'
 
-    # 1. Récupération des données
+    # --- NOUVELLE SECTION POUR CHEF DE MAISON (Extraction) ---
+    if is_house_manager:
+        with st.expander("👑 Outils d'Extraction pour Chef de Maison", expanded=True):
+            house_manager_extraction_interface(house_id)
+        st.markdown("---")
+
+
+    # 1. Récupération des données (pour le tableau de bord standard)
     df_transactions = get_house_transactions(house_id)
     house_balance, user_balance = calculate_balances(df_transactions, user_id)
 
@@ -369,13 +534,12 @@ def user_dashboard():
     col_h_bal, col_u_bal = st.columns(2)
     
     with col_h_bal:
-        st.metric(label="Solde du Foyer", 
+        st.metric(label="Solde du Foyer (Total)", 
                   value=f"{house_balance:,.2f} €", 
                   delta="Solde estimé de la caisse commune (Recettes - Dépenses)",
                   delta_color="normal")
         
     with col_u_bal:
-        # Affiche le solde personnel
         st.metric(label="Mon Solde Personnel", 
                   value=f"{user_balance:,.2f} €", 
                   delta_color="off", 
@@ -418,7 +582,7 @@ def user_dashboard():
     st.markdown("---")
     
     # 4. Affichage des Transactions
-    st.subheader("Historique des Transactions")
+    st.subheader("Historique des Transactions Récentes")
     if df_transactions.empty:
         st.info("Aucune transaction enregistrée pour l'instant.")
     else:
@@ -437,7 +601,8 @@ def user_dashboard():
         })
         
         cols_to_display = ['Date', 'Description', 'Montant', 'Type', 'Par', 'Méthode', 'Statut', 'doc_id']
-        st.dataframe(display_df[cols_to_display], use_container_width=True, hide_index=True)
+        # Limiter l'affichage pour la section standard du dashboard
+        st.dataframe(display_df[cols_to_display].head(10), use_container_width=True, hide_index=True)
 
 
 def admin_interface():
@@ -676,10 +841,12 @@ def authentication_and_main_flow():
             
         # Sinon, afficher l'interface principale selon le rôle
         else:
+            # L'Admin a toujours son propre panneau
             if st.session_state['role'] == 'admin':
                 admin_interface()
-            # Les autres rôles (utilisateur, chef_de_maison) ont le même tableau de bord pour l'instant
-            else:
+            # Les rôles 'utilisateur' et 'chef_de_maison' utilisent le même tableau de bord, 
+            # mais le chef de maison a des fonctionnalités supplémentaires.
+            else: 
                 user_dashboard()
 
 # -------------------------------------------------------------------
