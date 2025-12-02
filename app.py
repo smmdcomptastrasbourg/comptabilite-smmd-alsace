@@ -95,10 +95,29 @@ def check_password(password, hashed_password):
 
 @st.cache_data(ttl=300)
 def get_all_users():
-    """Récupère tous les utilisateurs (pour Admin)"""
+    """
+    Récupère tous les utilisateurs (pour Admin) et assure la présence des champs requis pour Pandas.
+    C'est ici que la résilience contre les KeyError est ajoutée.
+    """
     users_stream = db.collection(COL_USERS).stream()
-    return {d.id: d.to_dict() for d in users_stream}
+    
+    users_dict = {}
+    for d in users_stream:
+        user_data = d.to_dict()
+        
+        # VÉRIFICATION DE RÉSILIENCE: Assurer que les clés critiques existent même si elles ont été manuellement omises
+        # Cela corrige la KeyError
+        user_data.setdefault('house_id', 'INCONNU (Corriger Manuellement)')
+        user_data.setdefault('must_change_password', False)
+        # Assurer que les champs de base pour l'affichage existent
+        user_data.setdefault('first_name', 'N/A')
+        user_data.setdefault('last_name', 'N/A')
+        user_data.setdefault('role', 'utilisateur')
 
+        users_dict[d.id] = user_data
+        
+    return users_dict
+    
 @st.cache_data(ttl=300)
 def get_all_houses():
     """Récupère toutes les maisons (pour Admin)"""
@@ -371,9 +390,9 @@ def user_dashboard():
             
             col1, col2 = st.columns(2)
             with col1:
-                # CORRECTION: Suppression de l'argument 'required=True'
+                # Nature n'est plus forcé d'être "required=True"
                 nature = st.text_input("Nature de la Transaction (ex: Courses alimentaires, Loyer, Câble)")
-                # CORRECTION: Suppression de l'argument 'required=True'
+                # Montant n'est plus forcé d'être "required=True"
                 amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f")
             with col2:
                 tx_type = st.radio("Type de Mouvement", 
@@ -430,13 +449,14 @@ def admin_interface():
     # --- TAB 1: GESTION UTILISATEURS ---
     with tab1:
         st.header("Utilisateurs Actuels")
-        users = get_all_users()
+        users = get_all_users() # Les données ici sont maintenant sécurisées par get_all_users()
         
         if users:
             users_df = pd.DataFrame(users.values(), index=users.keys())
             
             # Afficher le tableau de données
             st.dataframe(
+                # L'ordre des colonnes est garanti par la fonction get_all_users()
                 users_df[['first_name', 'last_name', 'role', 'house_id', 'must_change_password']], 
                 use_container_width=True
             )
@@ -458,12 +478,12 @@ def admin_interface():
         with st.form("new_user_form", clear_on_submit=True):
             col_u1, col_u2, col_u3 = st.columns(3)
             with col_u1:
-                # CORRECTION: Suppression de l'argument 'required=True'
+                # ID Utilisateur n'est plus forcé d'être "required=True"
                 new_uid = st.text_input("ID Utilisateur (Login)") 
-                # CORRECTION: Suppression de l'argument 'required=True'
+                # Prénom n'est plus forcé d'être "required=True"
                 first_name = st.text_input("Prénom")
             with col_u2:
-                # CORRECTION: Suppression de l'argument 'required=True'
+                # Nom n'est plus forcé d'être "required=True"
                 last_name = st.text_input("Nom")
                 role = st.selectbox("Rôle", ROLES)
             with col_u3:
@@ -523,9 +543,9 @@ def admin_interface():
         st.markdown("---")
         st.subheader("Ajouter un Nouveau Foyer")
         with st.form("new_house_form", clear_on_submit=True):
-            # CORRECTION: Suppression de l'argument 'required=True'
+            # ID Foyer n'est plus forcé d'être "required=True"
             house_id = st.text_input("ID Foyer (Unique)")
-            # CORRECTION: Suppression de l'argument 'required=True'
+            # Nom Foyer n'est plus forcé d'être "required=True"
             house_name = st.text_input("Nom du Foyer (Ex: Maison Bleue)")
             
             if st.form_submit_button("Créer le Foyer", type="primary"):

@@ -1,10 +1,12 @@
+import bcrypt # 👈 AJOUTEZ CETTE LIGNE
+import sys # Pour sys.exit(1) si vous l'avez ajouté précédemment
+
 # 🚨🚨 MOT DE PASSE EN CLAIR INTÉGRÉ 🚨🚨
 # Le mot de passe choisi est 'florent1234'.
 password = "florent1234" 
 
 if not password:
     print("ERREUR : Le mot de passe est vide.")
-    return None
 
 print(f"Mot de passe en clair à hacher : '{password}'")
 
@@ -19,5 +21,3 @@ print("CLÉ 'password' du document admin (RÔLE : admin) dans la collection smmd
 print("=" * 60)
 print(f"\n{hashed_password_str}\n")
 print("=" * 60)
-
-return hashed_password_str
