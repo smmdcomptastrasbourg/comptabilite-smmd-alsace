@@ -16,14 +16,23 @@ COL_TRANSACTIONS = 'smmd_transactions'
 COL_HOUSES = 'smmd_houses'
 COL_USERS = 'smmd_users'
 COL_ALLOCATIONS = 'smmd_allocations' 
+COL_CATEGORIES = 'smmd_categories' 
 
 # Liste des méthodes de paiement et des rôles pour les formulaires
-PAYMENT_METHODS = ['carte', 'virement', 'liquide', 'autre']
+PAYMENT_METHODS = ['carte', 'virement', 'liquide', 'chèque', 'autre']
 ROLES = ['admin', 'utilisateur', 'chef_de_maison']
 TITLES = ['Frère', 'Abbé']
 # Le mot de passe par défaut pour les nouveaux utilisateurs
 DEFAULT_PASSWORD = "first123" 
 
+# Mappage des types de transaction pour l'affichage dans l'interface utilisateur
+TX_TYPE_MAP = {
+    'depense_commune': 'Dépense Commune (Fonds Foyer)',
+    'depense_avance': 'Avance de Fonds (Remboursement requis)',
+    'recette_mensuelle': 'Recette (Allocation Mensuelle)',
+    'recette_exceptionnelle': 'Recette Exceptionnelle',
+    'remboursement': 'Remboursement d\'Avance'
+}
 
 # -------------------------------------------------------------------
 # --- Configuration et Initialisation de Firebase
@@ -48,24 +57,17 @@ except json.JSONDecodeError:
 def initialize_firebase_connection():
     """
     Initialise l'application Firebase et retourne le client Firestore.
-    Utilise @st.cache_resource pour s'assurer que cette fonction ne s'exécute qu'une seule fois 
-    lors des réexécutions de Streamlit.
     """
     try:
-        # Récupère l'ID de l'application (nom d'instance)
         app_id = firebase_config.get('app_id', 'default-smmd-app')
         
-        # 1. Vérifie si l'application existe déjà.
         from firebase_admin import get_app
         try:
-            # Tente de récupérer l'instance existante
             app = get_app(app_id)
         except ValueError:
-            # 2. Si elle n'existe pas, l'initialise.
             cred = credentials.Certificate(firebase_config)
             app = initialize_app(cred, name=app_id)
         
-        # Retourne le client Firestore
         return firestore.client(app=app)
         
     except Exception as e:
@@ -77,13 +79,12 @@ db = initialize_firebase_connection()
 
 
 # -------------------------------------------------------------------
-# --- Fonctions Utilitaires (Hachage, Caching BDD)
+# --- Fonctions Utilitaires (Hachage, Caching BDD, Logique Année Scolaire)
 # -------------------------------------------------------------------
 
 def hash_password(password):
     """Hache un mot de passe en utilisant Bcrypt."""
     password_bytes = password.encode('utf-8')
-    # bcrypy.gensalt() génère un sel aléatoire
     hashed_bytes = bcrypt.hashpw(password_bytes, bcrypt.gensalt())
     return hashed_bytes.decode('utf-8')
 
@@ -93,40 +94,58 @@ def check_password(password, hashed_password):
     hashed_bytes = hashed_password.encode('utf-8')
     return bcrypt.checkpw(password_bytes, hashed_bytes)
 
+def get_school_year_range(dt):
+    """Retourne la date de début et de fin de l'année scolaire (1er Sep - 31 Août) contenant la date donnée."""
+    if dt.month >= 9:
+        start_year = dt.year
+        end_year = dt.year + 1
+    else:
+        start_year = dt.year - 1
+        end_year = dt.year
+        
+    start_date = date(start_year, 9, 1)
+    end_date = date(end_year, 8, 31)
+    
+    return start_date, end_date
+
 @st.cache_data(ttl=300)
 def get_all_users():
-    """
-    Récupère tous les utilisateurs (pour Admin) et assure la présence des champs requis pour Pandas.
-    C'est ici que la résilience contre les KeyError est ajoutée.
-    """
+    """Récupère tous les utilisateurs."""
     users_stream = db.collection(COL_USERS).stream()
-    
     users_dict = {}
     for d in users_stream:
         user_data = d.to_dict()
-        
-        # VÉRIFICATION DE RÉSILIENCE: Assurer que les clés critiques existent même si elles ont été manuellement omises
-        # Cela corrige la KeyError
         user_data.setdefault('house_id', 'INCONNU (Corriger Manuellement)')
         user_data.setdefault('must_change_password', False)
-        # Assurer que les champs de base pour l'affichage existent
         user_data.setdefault('first_name', 'N/A')
         user_data.setdefault('last_name', 'N/A')
         user_data.setdefault('role', 'utilisateur')
-
         users_dict[d.id] = user_data
         
     return users_dict
     
 @st.cache_data(ttl=300)
 def get_all_houses():
-    """Récupère toutes les maisons (pour Admin)"""
+    """Récupère toutes les maisons."""
     houses_stream = db.collection(COL_HOUSES).stream()
     return {d.id: d.to_dict() for d in houses_stream}
 
 def get_house_name(house_id):
     """Récupère le nom d'une maison à partir de son ID (utilise le cache)"""
     return get_all_houses().get(house_id, {}).get('name', 'Maison Inconnue')
+
+@st.cache_data(ttl=300)
+def get_all_categories():
+    """
+    Récupère toutes les catégories de dépenses.
+    Retourne un dictionnaire {category_id: category_name}.
+    """
+    categories_stream = db.collection(COL_CATEGORIES).stream()
+    categories = {d.id: d.to_dict().get('name', d.id) for d in categories_stream}
+    # S'assurer qu'il y a toujours une option si la BDD est vide
+    if not categories:
+        return {'autres': 'Autres (Veuillez définir des catégories)'}
+    return categories
 
 @st.cache_data(ttl=600) # Cache de 10 minutes pour les transactions
 def get_house_transactions(house_id):
@@ -135,7 +154,6 @@ def get_house_transactions(house_id):
         return pd.DataFrame()
         
     try:
-        # Récupère les transactions liées à la house_id de l'utilisateur
         q = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
         data = [d.to_dict() | {'doc_id': d.id} for d in q]
         
@@ -156,27 +174,92 @@ def get_house_transactions(house_id):
 
 
 # -------------------------------------------------------------------
-# --- Fonctions CRUD et Logique (Avec Amélioration de l'Intégrité)
+# --- Fonctions CRUD et Logique (Incluant les fonctions manquantes)
 # -------------------------------------------------------------------
 
-def save_transaction(house_id, user_id, type, amount, nature, payment_method=None, notes=None):
-    """Enregistre une nouvelle transaction dans Firestore."""
+def delete_user(user_id):
+    """Supprime un utilisateur et son enregistrement d'allocation."""
+    try:
+        # Supprimer l'utilisateur
+        db.collection(COL_USERS).document(user_id).delete()
+        
+        # Supprimer son enregistrement d'allocation s'il existe
+        allocation_doc = db.collection(COL_ALLOCATIONS).document(user_id)
+        if allocation_doc.get().exists:
+            allocation_doc.delete()
+            
+        st.toast(f"Utilisateur {user_id} et son allocation supprimés.", icon='🗑️')
+        get_all_users.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erreur de suppression d'utilisateur : {e}")
+        return False
+
+def delete_house(house_id):
+    """Supprime un foyer."""
+    try:
+        # 1. Mettre à jour les utilisateurs associés à 'INCONNU'
+        # Pour éviter des erreurs si on tente de supprimer le foyer sans avoir corrigé les utilisateurs
+        users_to_update = db.collection(COL_USERS).where('house_id', '==', house_id).stream()
+        batch = db.batch()
+        for user_doc in users_to_update:
+            batch.update(user_doc.reference, {'house_id': 'INCONNU (Corriger Manuellement)'})
+        batch.commit()
+        
+        # 2. Supprimer la maison
+        db.collection(COL_HOUSES).document(house_id).delete()
+        
+        st.toast(f"Foyer {house_id} supprimé. Les utilisateurs associés ont été mis à jour.", icon='🗑️')
+        get_all_houses.clear()
+        get_all_users.clear() # Le cache utilisateur doit être effacé car des house_id ont changé
+        return True
+    except Exception as e:
+        st.error(f"Erreur de suppression de foyer : {e}")
+        return False
+
+def save_category(category_id, name):
+    """Crée ou met à jour une catégorie de dépense."""
+    try:
+        db.collection(COL_CATEGORIES).document(category_id).set({
+            'name': name,
+            'updated_at': datetime.now().isoformat()
+        })
+        st.toast(f"Catégorie '{name}' enregistrée !", icon='✅')
+        get_all_categories.clear()
+        return True
+    except Exception as e:
+        st.error(f"Erreur lors de l'enregistrement de la catégorie : {e}")
+        return False
+
+def delete_category(category_id):
+    """Supprime une catégorie de dépense."""
+    try:
+        # Vérification simple (peut être affinée pour vérifier si des transactions l'utilisent)
+        db.collection(COL_CATEGORIES).document(category_id).delete()
+        st.toast(f"Catégorie '{category_id}' supprimée.", icon='🗑️')
+        get_all_categories.clear() 
+        return True
+    except Exception as e: 
+        st.error(f"Erreur de suppression de catégorie : {e}")
+        return False
+
+def save_transaction(house_id, user_id, type, amount, nature, category_id, payment_method=None, notes=None):
+    """Enregistre une nouvelle transaction dans Firestore. Maintenant avec category_id."""
     try:
         data = {
             'house_id': house_id, 
             'user_id': user_id, 
-            'type': type, # 'depense', 'recette_mensuelle', 'depense_avance', 'remboursement'
+            'type': type, 
             'amount': round(float(amount), 2), 
             'nature': nature,
+            'category_id': category_id, 
             'payment_method': payment_method, 
             'created_at': datetime.now().isoformat(),
             'status': 'validé' if type != 'depense_avance' else 'en_attente_remboursement', 
             'month_year': datetime.now().strftime('%Y-%m') 
         }
-        # Ajout du document à la collection
         doc_ref = db.collection(COL_TRANSACTIONS).add(data)
         st.toast("Transaction enregistrée !", icon='✅')
-        # Invalide le cache des transactions pour forcer un rechargement
         get_house_transactions.clear()
         return doc_ref.id 
     except Exception as e:
@@ -214,109 +297,40 @@ def set_monthly_allocation(user_id, house_id, amount):
         current_month = datetime.now().strftime('%Y-%m')
         user_name = st.session_state['user_data'].get('first_name', user_id)
         
-        # Recherche de la transaction de recette existante pour ce mois
         q = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).where('month_year', '==', current_month).where('type', '==', 'recette_mensuelle').limit(1).stream()
         existing_tx = next(q, None)
         
+        # La recette mensuelle n'a pas besoin de catégorie de dépense
+        category_id_for_revenue = 'allocation_mensuelle' 
+        
         if existing_tx:
-            # Si elle existe, la mettre à jour
             db.collection(COL_TRANSACTIONS).document(existing_tx.id).update({'amount': amount})
         else:
-            # Sinon, créer une nouvelle transaction de recette
-            # Note : user_data n'est pas disponible ici, on utilise le user_id pour le nom par défaut
-            # Pour l'admin/chef de maison, on passe l'ID de la personne qui définit l'allocation
-            save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Allocation Mensuelle de {user_name} (Mois en cours)", payment_method='virement')
+            save_transaction(house_id, user_id, 'recette_mensuelle', amount, f"Allocation Mensuelle de {user_name} (Mois en cours)", category_id_for_revenue, payment_method='virement')
             
         st.toast(f"Allocation mensuelle mise à jour à {amount}€ pour ce mois.", icon="💸")
         get_house_transactions.clear() 
         return True
     except Exception as e: st.error(f"Erreur lors de la mise à jour de l'allocation: {e}")
-    
 
 def calculate_balances(df, current_user_id):
-    """
-    Calcule le solde total de la maison et le solde personnel de l'utilisateur
-    (Fonction simplifiée pour la démo, nécessite une logique financière plus robuste en production).
-    """
+    """Calcule le solde total de la maison et le solde personnel de l'utilisateur."""
     if df.empty:
         return 0.00, 0.00
     
-    # Simuler le solde de la maison (Recettes - Dépenses)
-    # On considère ici toutes les recettes et toutes les dépenses
-    house_balance = df[df['type'].str.contains('recette')]['amount'].sum() - df[df['type'].str.contains('depense')]['amount'].sum()
+    # Solde de la Maison (Recettes - Dépenses)
+    house_revenues = df[df['type'].str.contains('recette')]['amount'].sum()
+    house_expenses = df[df['type'].isin(['depense_commune', 'depense_avance', 'remboursement'])]['amount'].sum()
+    house_balance = house_revenues - house_expenses
     
-    # Solde personnel (argent avancé par l'utilisateur - argent dépensé par l'utilisateur)
-    # L'utilisateur gagne par les 'recettes' (allocation) et perd par les 'dépenses_avances' qu'il n'a pas été remboursé
-    user_contributions = df[(df['user_id'] == current_user_id) & (df['type'].str.contains('recette'))]['amount'].sum()
-    user_advances = df[(df['user_id'] == current_user_id) & (df['type'] == 'depense_avance')]['amount'].sum()
-    user_reimbursements = df[(df['type'] == 'remboursement') & (df['user_id'] == current_user_id)]['amount'].sum() # Remboursements reçus
-    
-    # Le solde personnel est l'argent mis par l'utilisateur moins les dépenses qui lui sont attribuées (très simplifié)
-    user_balance = user_contributions - user_advances + user_reimbursements
+    # Solde Personnel (Avances non remboursées)
+    user_advances_due = df[(df['user_id'] == current_user_id) & (df['type'] == 'depense_avance') & (df['status'] == 'en_attente_remboursement')]['amount'].sum()
+    user_balance = user_advances_due 
     
     return round(house_balance, 2), round(user_balance, 2)
-
-# --- NOUVELLES FONCTIONS DE SUPPRESSION AVEC CONTRÔLE D'INTÉGRITÉ ---
-
-def delete_user(user_id):
-    """
-    Supprime un utilisateur, ses allocations et toutes ses transactions associées.
-    Nécessite une boucle pour les transactions car Firestore ne gère pas les suppressions en cascade.
-    """
-    try:
-        # 1. Suppression des allocations (si l'utilisateur en a une)
-        db.collection(COL_ALLOCATIONS).document(user_id).delete()
-        
-        # 2. Suppression des transactions liées à cet utilisateur
-        transactions_to_delete = db.collection(COL_TRANSACTIONS).where('user_id', '==', user_id).stream()
-        count = 0
-        for tx in transactions_to_delete:
-            db.collection(COL_TRANSACTIONS).document(tx.id).delete()
-            count += 1
-            
-        # 3. Suppression du document utilisateur
-        db.collection(COL_USERS).document(user_id).delete()
-        
-        st.toast(f"Utilisateur {user_id} et toutes ses données associées ({count} transactions) ont été supprimés.", icon='🗑️')
-        get_all_users.clear() # Invalide le cache utilisateur
-        get_house_transactions.clear() # Invalide le cache des transactions
-        st.rerun()
-        return True
-    except Exception as e: 
-        st.error(f"Erreur de suppression d'utilisateur: {e}")
-        return False
-
-def delete_house(house_id):
-    """
-    Supprime un foyer uniquement s'il n'y a plus d'utilisateurs ni de transactions associées.
-    """
-    try:
-        # 1. Vérifier si des utilisateurs sont encore associés
-        associated_users = list(db.collection(COL_USERS).where('house_id', '==', house_id).limit(1).stream())
-        if associated_users:
-            st.error(f"Impossible de supprimer le foyer : {len(associated_users)} utilisateur(s) y est/sont toujours associé(s).")
-            return False
-            
-        # 2. Vérifier si des transactions existent encore pour ce foyer
-        associated_tx = list(db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).limit(1).stream())
-        if associated_tx:
-            st.error(f"Impossible de supprimer le foyer : {len(associated_tx)} transaction(s) y est/sont toujours rattachée(s).")
-            return False
-        
-        # 3. Suppression du document Foyer
-        db.collection(COL_HOUSES).document(house_id).delete()
-        
-        st.toast(f"Maison {house_id} supprimée.", icon='🗑️')
-        get_all_houses.clear() # Invalide le cache des maisons
-        st.rerun()
-        return True
-    except Exception as e: 
-        st.error(f"Erreur de suppression de maison: {e}")
-        return False
-        
         
 # -------------------------------------------------------------------
-# --- NOUVELLES FONCTIONS D'EXTRACTION DE DONNÉES (CHEF DE MAISON)
+# --- Fonctions d'Extraction de Données (CHEF DE MAISON)
 # -------------------------------------------------------------------
 
 def filter_transactions_by_period(df, start_date=None, end_date=None):
@@ -326,58 +340,87 @@ def filter_transactions_by_period(df, start_date=None, end_date=None):
         
     df_filtered = df.copy()
     
-    # Assurer que la colonne de datetime est présente pour le filtrage
     if 'created_at_dt' not in df_filtered.columns:
         df_filtered['created_at_dt'] = pd.to_datetime(df_filtered['created_at'])
 
     if start_date:
-        # Le filtre doit inclure toutes les transactions à partir du début de la date de début
         df_filtered = df_filtered[df_filtered['created_at_dt'] >= pd.to_datetime(start_date)]
     
     if end_date:
-        # Le filtre doit inclure toutes les transactions jusqu'à la fin de la date de fin
-        # On ajoute un jour pour inclure la journée entière de la date de fin
         end_date_inclusive = pd.to_datetime(end_date) + timedelta(days=1) - timedelta(seconds=1)
         df_filtered = df_filtered[df_filtered['created_at_dt'] <= end_date_inclusive]
         
     return df_filtered.sort_values(by='created_at_dt', ascending=False)
 
-
-# -------------------------------------------------------------------
-# --- Interfaces Utilisateur
-# -------------------------------------------------------------------
-
-def password_reset_interface(user_id):
-    """Interface pour forcer un changement de mot de passe à la première connexion."""
-    st.title("🔒 Premier Mot de Passe: Changement Obligatoire")
-    st.warning("Pour des raisons de sécurité, veuillez définir un nouveau mot de passe.")
+def display_extraction_results(df_filtered, start_date_filter, end_date_filter, period_name, house_id):
+    """Affiche les résultats de l'extraction avec séparation des recettes et dépenses."""
     
-    new_password = st.text_input("Nouveau Mot de Passe", type="password", key="new_pw_reset")
-    confirm_password = st.text_input("Confirmer le Nouveau Mot de Passe", type="password", key="confirm_pw_reset")
+    st.subheader(f"Transactions du Foyer pour la période : {period_name} ({start_date_filter} au {end_date_filter})")
+    
+    if df_filtered.empty:
+        st.warning("Aucune transaction trouvée pour cette période.")
+        return
+        
+    # Identification des recettes et dépenses
+    df_revenues = df_filtered[df_filtered['type'].str.contains('recette')]
+    df_expenses = df_filtered[df_filtered['type'].str.contains('depense') | (df_filtered['type'] == 'remboursement')]
+    
+    total_revenues = df_revenues['amount'].sum()
+    total_expenses = df_expenses['amount'].sum()
+    net_balance = total_revenues - total_expenses
+    
+    # Affichage des métriques clés
+    col_rev, col_exp, col_bal = st.columns(3)
+    col_rev.metric("Total Recettes (€)", f"{total_revenues:,.2f} €", delta="Inclut les allocations et recettes exceptionnelles")
+    col_exp.metric("Total Dépenses (€)", f"{total_expenses:,.2f} €", delta="Inclut les dépenses communes, avances et remboursements")
+    col_bal.metric("Solde Net de la Période (€)", f"{net_balance:,.2f} €")
+    
+    st.markdown("---")
+    
+    # Agrégation des dépenses par catégorie
+    st.subheader("Synthèse des Dépenses par Catégorie")
+    df_depenses_par_cat = df_expenses.groupby('category_id')['amount'].sum().reset_index()
+    # On met le nom de la colonne du montant pour l'affichage
+    df_depenses_par_cat = df_depenses_par_cat.rename(columns={'category_id': 'Catégorie', 'amount': 'Total Dépensé (€)'})
+    df_depenses_par_cat['Pourcentage (%)'] = (df_depenses_par_cat['Total Dépensé (€)'] / total_expenses * 100).round(2)
+    df_depenses_par_cat['Total Dépensé (€)'] = df_depenses_par_cat['Total Dépensé (€)'].apply(lambda x: f"{x:,.2f} €")
+    
+    # Trier par montant décroissant
+    st.dataframe(df_depenses_par_cat.sort_values(by='Pourcentage (%)', ascending=False), use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    
+    st.subheader("Détail des Transactions")
+    
+    # Préparation du DataFrame pour l'affichage/export
+    display_df = df_filtered.copy()
+    display_df['Montant (€)'] = display_df['amount'].apply(lambda x: f"{x:,.2f}")
+    display_df['Date'] = display_df['created_at_dt'].dt.strftime('%d/%m/%Y %H:%M')
+    # Utiliser le mappage pour un affichage lisible
+    display_df['Type'] = display_df['type'].map(TX_TYPE_MAP).fillna(display_df['type']).str.capitalize()
+    
+    export_df = display_df.rename(columns={
+        'nature': 'Description',
+        'category_id': 'Catégorie', 
+        'user_id': 'Utilisateur ID',
+        'payment_method': 'Méthode',
+        'status': 'Statut',
+        'house_id': 'Foyer ID'
+    })
+    
+    cols_to_display = ['Date', 'Description', 'Catégorie', 'Montant (€)', 'Type', 'Utilisateur ID', 'Méthode', 'Statut']
+    
+    st.dataframe(export_df[cols_to_display], use_container_width=True, hide_index=True)
 
-    if st.button("Changer le Mot de Passe", type="primary"):
-        if new_password != confirm_password:
-            st.error("Les mots de passe ne correspondent pas.")
-        elif len(new_password) < 6:
-            st.error("Le mot de passe doit contenir au moins 6 caractères.")
-        else:
-            try:
-                # 1. Hacher le nouveau mot de passe
-                hashed_new_password = hash_password(new_password)
-                
-                # 2. Mettre à jour Firestore
-                db.collection(COL_USERS).document(user_id).update({
-                    'password_hash': hashed_new_password,
-                    'must_change_password': False # Désactiver l'obligation de changement
-                })
-                
-                st.success("Mot de passe mis à jour avec succès! Veuillez vous reconnecter.")
-                # Déconnecter l'utilisateur après le changement de mot de passe
-                st.session_state.clear()
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
+    # Bouton d'export
+    csv_export = export_df[cols_to_display].to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Télécharger les données filtrées (CSV)",
+        data=csv_export,
+        file_name=f'transactions_{house_id}_{start_date_filter}_a_{end_date_filter}.csv',
+        mime='text/csv',
+        type="primary"
+    )
 
 def house_manager_extraction_interface(house_id):
     """Interface d'extraction de données pour le Chef de Maison."""
@@ -389,28 +432,25 @@ def house_manager_extraction_interface(house_id):
         st.info("Aucune transaction n'a encore été enregistrée pour ce foyer pour l'extraction.")
         return
 
-    # S'assurer que la colonne est au format datetime pour le filtrage
     if 'created_at_dt' not in df_all_tx.columns:
         df_all_tx['created_at_dt'] = pd.to_datetime(df_all_tx['created_at'])
 
-    # Déterminer les dates min/max pour les widgets
     min_date = df_all_tx['created_at_dt'].min().date()
     max_date = df_all_tx['created_at_dt'].max().date()
     
     st.subheader("Choisir la Période d'Analyse")
     
-    # 1. Sélection du type de filtre
     filter_type = st.radio(
         "Type de Filtre", 
-        ['Période Personnalisée', 'Par Mois', 'Par Trimestre'], 
+        ['Période Personnalisée', 'Par Mois', 'Par Trimestre (Scolaire)', 'Par Année Scolaire Entière'], 
         horizontal=True
     )
     
-    # Initialisation des dates de filtre
     start_date_filter = None
     end_date_filter = None
+    period_label = filter_type
     
-    # 2. Widgets de sélection de période
+    # Logique de sélection de période (Inchangement)
     if filter_type == 'Période Personnalisée':
         col_start, col_end = st.columns(2)
         with col_start:
@@ -421,42 +461,83 @@ def house_manager_extraction_interface(house_id):
         if start_date_filter > end_date_filter:
             st.error("La date de début ne peut pas être postérieure à la date de fin.")
             return
+        period_label = "Période Personnalisée"
 
     elif filter_type == 'Par Mois':
-        # Extraction de tous les mois/années uniques pour le sélecteur
         df_all_tx['month_str'] = df_all_tx['created_at_dt'].dt.strftime('%Y-%m')
         unique_months = sorted(df_all_tx['month_str'].unique(), reverse=True)
         
-        if not unique_months:
-             st.info("Aucune transaction avec date enregistrée.")
-             return
+        if not unique_months: st.info("Aucune transaction avec date enregistrée."); return
 
         selected_month_str = st.selectbox("Sélectionner un Mois (AAAA-MM)", unique_months)
         
-        # Déterminer les dates de début/fin pour le mois sélectionné
         selected_month = datetime.strptime(selected_month_str, '%Y-%m')
         start_date_filter = selected_month.date()
-        # Calculer le dernier jour du mois
         if selected_month.month == 12:
             end_date_filter = date(selected_month.year, 12, 31)
         else:
             end_date_filter = date(selected_month.year, selected_month.month + 1, 1) - timedelta(days=1)
+        period_label = f"Mois de {selected_month_str}"
             
-    elif filter_type == 'Par Trimestre':
-        df_all_tx['year'] = df_all_tx['created_at_dt'].dt.year
-        df_all_tx['quarter'] = df_all_tx['created_at_dt'].dt.to_period('Q')
+    elif filter_type == 'Par Trimestre (Scolaire)':
+        def get_school_year_quarter(dt):
+            if dt.month >= 9:
+                school_year = f"{dt.year}-{dt.year + 1}"
+                quarter_idx = 1
+            else:
+                school_year = f"{dt.year - 1}-{dt.year}"
+                if dt.month >= 6: quarter_idx = 4
+                elif dt.month >= 3: quarter_idx = 3
+                else: quarter_idx = 2
+            return school_year, quarter_idx
+
+        df_temp = df_all_tx.copy()
+        df_temp['school_info'] = df_temp['created_at_dt'].apply(get_school_year_quarter)
+        df_temp['school_year_str'] = df_temp['school_info'].apply(lambda x: f"{x[0]} T{x[1]}")
         
-        unique_quarters = sorted(df_all_tx['quarter'].unique(), reverse=True)
+        df_temp['sort_key'] = df_temp['school_info'].apply(lambda x: (int(x[0].split('-')[0]), x[1]))
+        unique_options = sorted(df_temp['school_year_str'].unique(), key=lambda x: df_temp[df_temp['school_year_str'] == x]['sort_key'].iloc[0], reverse=True)
         
-        if not unique_quarters:
-             st.info("Aucune transaction avec date enregistrée.")
-             return
+        if not unique_options: st.info("Aucune transaction avec date enregistrée."); return
              
-        selected_quarter = st.selectbox("Sélectionner un Trimestre", unique_quarters, format_func=lambda x: f"{x.year} T{x.quarter}")
+        selected_quarter_str = st.selectbox("Sélectionner un Trimestre (Année Scolaire)", unique_options)
         
-        # Déterminer les dates de début/fin pour le trimestre sélectionné
-        start_date_filter = selected_quarter.start_time.date()
-        end_date_filter = selected_quarter.end_time.date()
+        sy_part, q_part = selected_quarter_str.split(' T')
+        start_year = int(sy_part.split('-')[0])
+        quarter_num = int(q_part)
+        period_label = selected_quarter_str
+        
+        if quarter_num == 1: 
+            start_date_filter = date(start_year, 9, 1); end_date_filter = date(start_year, 11, 30)
+        elif quarter_num == 2: 
+            start_date_filter = date(start_year, 12, 1)
+            next_month = date(start_year + 1, 3, 1)
+            end_date_filter = next_month - timedelta(days=1)
+        elif quarter_num == 3: 
+            start_date_filter = date(start_year + 1, 3, 1); end_date_filter = date(start_year + 1, 5, 31)
+        elif quarter_num == 4: 
+            start_date_filter = date(start_year + 1, 6, 1); end_date_filter = date(start_year + 1, 8, 31)
+
+    elif filter_type == 'Par Année Scolaire Entière':
+        all_school_years = []
+        for dt in df_all_tx['created_at_dt'].dt.date.unique():
+            sy_start, sy_end = get_school_year_range(dt)
+            sy_str = f"{sy_start.year}-{sy_end.year}"
+            if sy_str not in all_school_years:
+                all_school_years.append(sy_str)
+
+        all_school_years.sort(reverse=True)
+        
+        if not all_school_years: st.info("Aucune transaction avec date enregistrée."); return
+        
+        selected_sy_str = st.selectbox("Sélectionner une Année Scolaire", all_school_years)
+        
+        sy_start_year = int(selected_sy_str.split('-')[0])
+        sy_end_year = int(selected_sy_str.split('-')[1])
+        
+        start_date_filter = date(sy_start_year, 9, 1)
+        end_date_filter = date(sy_end_year, 8, 31)
+        period_label = f"Année Scolaire {selected_sy_str}"
 
 
     # 3. Filtrage et affichage
@@ -464,51 +545,11 @@ def house_manager_extraction_interface(house_id):
         df_filtered = filter_transactions_by_period(df_all_tx, start_date_filter, end_date_filter)
         
         st.markdown("---")
-        st.subheader(f"Transactions du Foyer du {start_date_filter} au {end_date_filter}")
-        
-        if df_filtered.empty:
-            st.warning("Aucune transaction trouvée pour cette période.")
-        else:
-            # Calculer le solde pour la période filtrée
-            house_balance_filtered, _ = calculate_balances(df_filtered, st.session_state['user_id'])
-            
-            # Affichage du solde de la période
-            st.metric(
-                label=f"Solde de la Période Sélectionnée ({filter_type})", 
-                value=f"{house_balance_filtered:,.2f} €",
-                delta="Recettes - Dépenses pour la période"
-            )
-
-            # Préparation du DataFrame pour l'affichage/export
-            display_df = df_filtered.copy()
-            display_df['Montant (€)'] = display_df['amount'].apply(lambda x: f"{x:,.2f}")
-            display_df['Date'] = display_df['created_at_dt'].dt.strftime('%d/%m/%Y %H:%M')
-            display_df['Type'] = display_df['type'].str.replace('_', ' ').str.capitalize()
-            
-            export_df = display_df.rename(columns={
-                'nature': 'Description',
-                'user_id': 'Utilisateur ID',
-                'payment_method': 'Méthode',
-                'status': 'Statut',
-                'house_id': 'Foyer ID'
-            })
-            
-            cols_to_display = ['Date', 'Description', 'Montant (€)', 'Type', 'Utilisateur ID', 'Méthode', 'Statut']
-            st.dataframe(export_df[cols_to_display], use_container_width=True, hide_index=True)
-
-            # Bouton d'export
-            csv_export = export_df[cols_to_display].to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Télécharger les données filtrées (CSV)",
-                data=csv_export,
-                file_name=f'transactions_{house_id}_{start_date_filter}_a_{end_date_filter}.csv',
-                mime='text/csv',
-                type="primary"
-            )
+        display_extraction_results(df_filtered, start_date_filter, end_date_filter, period_label, house_id)
 
 
 def user_dashboard(): 
-    """Affiche le tableau de bord de l'utilisateur pour la gestion des dépenses."""
+    """Affiche le tableau de bord de l'utilisateur pour la gestion des dépenses et recettes."""
     user_data = st.session_state['user_data']
     house_id = st.session_state['house_id']
     user_id = st.session_state['user_id']
@@ -519,65 +560,119 @@ def user_dashboard():
     
     is_house_manager = st.session_state['role'] == 'chef_de_maison'
 
-    # --- NOUVELLE SECTION POUR CHEF DE MAISON (Extraction) ---
     if is_house_manager:
-        with st.expander("👑 Outils d'Extraction pour Chef de Maison", expanded=True):
+        with st.expander("👑 Outils d'Extraction pour Chef de Maison", expanded=False):
             house_manager_extraction_interface(house_id)
         st.markdown("---")
 
-
-    # 1. Récupération des données (pour le tableau de bord standard)
     df_transactions = get_house_transactions(house_id)
     house_balance, user_balance = calculate_balances(df_transactions, user_id)
 
-    # 2. Affichage des soldes
     col_h_bal, col_u_bal = st.columns(2)
     
     with col_h_bal:
         st.metric(label="Solde du Foyer (Total)", 
                   value=f"{house_balance:,.2f} €", 
-                  delta="Solde estimé de la caisse commune (Recettes - Dépenses)",
+                  delta="Solde net (Recettes - Dépenses)",
                   delta_color="normal")
         
     with col_u_bal:
-        st.metric(label="Mon Solde Personnel", 
+        st.metric(label="Mes Avances en Attente de Remboursement", 
                   value=f"{user_balance:,.2f} €", 
                   delta_color="off", 
-                  help="Vos avances/recettes personnelles vs vos dépenses. Attention: Ceci est un calcul simplifié.")
+                  help="Montant total des dépenses avancées non encore remboursées.")
 
     st.markdown("---")
+    
+    # Récupération des catégories pour le formulaire de dépense
+    categories_map = get_all_categories()
+    category_names = list(categories_map.values())
+    
+    # Utilisation d'un mapping inverse pour retrouver l'ID à partir du nom sélectionné
+    name_to_id = {v: k for k, v in categories_map.items()}
 
-    # 3. Formulaire pour ajouter une transaction
-    with st.expander("➕ Ajouter une nouvelle dépense/recette", expanded=False):
-        with st.form("new_transaction_form", clear_on_submit=True):
-            st.subheader("Détails de la Transaction")
+    tab_depense, tab_recette = st.tabs(["💶 Enregistrer une Dépense", "💰 Enregistrer une Recette Exceptionnelle"])
+
+    # --- TAB 1: ENREGISTRER UNE DÉPENSE ---
+    with tab_depense:
+        with st.form("new_expense_form", clear_on_submit=True):
+            st.subheader("Détails de la Dépense")
             
             col1, col2 = st.columns(2)
+            
             with col1:
-                # Nature n'est plus forcé d'être "required=True"
-                nature = st.text_input("Nature de la Transaction (ex: Courses alimentaires, Loyer, Câble)")
-                # Montant n'est plus forcé d'être "required=True"
-                amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f")
+                # La nature est maintenant le libellé de la transaction
+                nature = st.text_input("Libellé de la Dépense (ex: Achat de lait)", key="nature_depense_input")
+                # Sélection de la Catégorie
+                selected_category_name = st.selectbox("Catégorie de Dépense", category_names, key="category_select")
+                
             with col2:
-                tx_type = st.radio("Type de Mouvement", 
-                                   options=['depense', 'recette_mensuelle', 'depense_avance', 'remboursement'], 
-                                   format_func=lambda x: x.replace('_', ' ').capitalize(), 
-                                   horizontal=True)
-                payment_method = st.selectbox("Méthode de Paiement (si dépense)", PAYMENT_METHODS)
-            
-            notes = st.text_area("Notes additionnelles (facultatif)")
-            
-            if st.form_submit_button("Enregistrer la Transaction", type="primary"):
-                # VALIDATION MANUELLE
-                if not nature or amount is None or amount <= 0:
-                    st.error("Veuillez remplir la nature et spécifier un montant valide.")
-                # Simuler la logique de 'recette_mensuelle' pour ne pas la laisser manuelle
-                elif tx_type == 'recette_mensuelle':
-                    st.error("La 'Recette Mensuelle' est gérée via l'allocation (section Admin/Chef de Maison). Veuillez choisir Dépense, Avance ou Remboursement.")
+                amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f", key="amount_depense_input")
+                
+            # Colonne pour le financement
+            col3, col4 = st.columns(2)
+
+            with col3:
+                funding_type = st.radio(
+                    "Comment la dépense a-t-elle été payée ?", 
+                    options=[
+                        'Fonds du Foyer (CB Maison, Virement Foyer)', 
+                        'Fonds Personnel (Avance, Remboursement requis)'
+                    ],
+                    key="funding_type_radio"
+                )
+                
+            with col4:
+                # Détermine les options de paiement en fonction du choix
+                if 'Fonds du Foyer' in funding_type:
+                    tx_type = 'depense_commune'
+                    payment_options = ['carte', 'virement', 'autre']
+                    payment_method = st.selectbox("Méthode de Paiement du Foyer", payment_options, key="method_depense_foyer")
+                    st.info("Cette dépense diminue directement le solde de la maison.")
                 else:
-                    save_transaction(house_id, user_id, tx_type, amount, nature, payment_method, notes)
-                    # Forcer l'actualisation du tableau après l'ajout
+                    tx_type = 'depense_avance'
+                    payment_options = ['carte', 'chèque', 'liquide', 'virement'] # Choix utilisateur pour l'avance
+                    payment_method = st.selectbox("Méthode de Paiement Personnel", payment_options, key="method_depense_perso")
+                    st.warning("Ceci est une Avance de Fonds. Un remboursement par la maison est dû.")
+            
+            notes = st.text_area("Notes additionnelles (facultatif)", key="notes_depense_input")
+            
+            if st.form_submit_button("Enregistrer la Dépense", type="primary"):
+                # Récupérer l'ID de la catégorie
+                category_id_to_save = name_to_id.get(selected_category_name, 'non_categorise')
+
+                if not nature or amount is None or amount <= 0:
+                    st.error("Veuillez remplir le libellé et spécifier un montant valide.")
+                else:
+                    save_transaction(house_id, user_id, tx_type, amount, nature, category_id_to_save, payment_method, notes)
                     st.rerun() 
+
+    # --- TAB 2: ENREGISTRER UNE RECETTE EXCEPTIONNELLE ---
+    with tab_recette:
+        with st.form("new_revenue_form", clear_on_submit=True):
+            st.subheader("Détails de la Recette")
+            
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                nature_recette = st.text_input("Libellé de la Recette (ex: Don, Entrée d'argent non planifiée)", key="nature_recette_input")
+                amount_recette = st.number_input("Montant (€)", min_value=0.01, format="%.2f", key="amount_recette_input")
+                # La catégorie pour les recettes est 'recette' par défaut
+                category_id_recette = 'recette_exceptionnelle'
+                
+            with col4:
+                payment_method_recette = st.selectbox("Méthode de Réception", PAYMENT_METHODS, key="method_recette_input")
+                st.info("Cette recette augmente le solde de la caisse commune.")
+            
+            notes_recette = st.text_area("Notes additionnelles (facultatif)", key="notes_recette_input")
+            
+            if st.form_submit_button("Enregistrer la Recette", type="primary"):
+                if not nature_recette or amount_recette is None or amount_recette <= 0:
+                    st.error("Veuillez remplir le libellé et spécifier un montant valide.")
+                else:
+                    save_transaction(house_id, user_id, 'recette_exceptionnelle', amount_recette, nature_recette, category_id_recette, payment_method_recette, notes_recette)
+                    st.rerun() 
+                    
 
     st.markdown("---")
     
@@ -586,42 +681,37 @@ def user_dashboard():
     if df_transactions.empty:
         st.info("Aucune transaction enregistrée pour l'instant.")
     else:
-        # Nettoyer le DataFrame pour l'affichage
         display_df = df_transactions.copy()
         display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
         display_df['Date'] = pd.to_datetime(display_df['created_at']).dt.strftime('%d/%m/%Y %H:%M')
-        display_df['Type'] = display_df['type'].str.replace('_', ' ').str.capitalize()
+        display_df['Type'] = display_df['type'].map(TX_TYPE_MAP).fillna(display_df['type']).str.capitalize()
         
-        # Renommer et sélectionner les colonnes
         display_df = display_df.rename(columns={
             'nature': 'Description',
+            'category_id': 'Catégorie', 
             'user_id': 'Par',
             'payment_method': 'Méthode',
             'status': 'Statut'
         })
         
-        cols_to_display = ['Date', 'Description', 'Montant', 'Type', 'Par', 'Méthode', 'Statut', 'doc_id']
-        # Limiter l'affichage pour la section standard du dashboard
+        cols_to_display = ['Date', 'Description', 'Catégorie', 'Montant', 'Type', 'Par', 'Méthode', 'Statut', 'doc_id']
         st.dataframe(display_df[cols_to_display].head(10), use_container_width=True, hide_index=True)
 
 
 def admin_interface():
-    """Affiche l'interface Admin pour la gestion des utilisateurs et des maisons."""
+    """Affiche l'interface Admin pour la gestion des utilisateurs, des maisons et des catégories."""
     st.title("👑 Panneau d'Administration")
     
-    tab1, tab2, tab3 = st.tabs(["Gestion Utilisateurs", "Gestion Foyers", "Paramètres Allocation"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Gestion Utilisateurs", "Gestion Foyers", "Paramètres Allocation", "Gestion Catégories"])
     
     # --- TAB 1: GESTION UTILISATEURS ---
     with tab1:
         st.header("Utilisateurs Actuels")
-        users = get_all_users() # Les données ici sont maintenant sécurisées par get_all_users()
+        users = get_all_users() 
         
         if users:
             users_df = pd.DataFrame(users.values(), index=users.keys())
-            
-            # Afficher le tableau de données
             st.dataframe(
-                # L'ordre des colonnes est garanti par la fonction get_all_users()
                 users_df[['first_name', 'last_name', 'role', 'house_id', 'must_change_password']], 
                 use_container_width=True
             )
@@ -632,7 +722,6 @@ def admin_interface():
             with col_del:
                 user_to_delete = st.selectbox("ID Utilisateur à Supprimer", users.keys(), key="del_user_select")
                 
-                # Le bouton déclenche la suppression
                 if st.button(f"Confirmer la Suppression de {user_to_delete}", key="confirm_del_user", type="secondary"):
                     delete_user(user_to_delete)
         else:
@@ -643,22 +732,17 @@ def admin_interface():
         with st.form("new_user_form", clear_on_submit=True):
             col_u1, col_u2, col_u3 = st.columns(3)
             with col_u1:
-                # ID Utilisateur n'est plus forcé d'être "required=True"
                 new_uid = st.text_input("ID Utilisateur (Login)") 
-                # Prénom n'est plus forcé d'être "required=True"
                 first_name = st.text_input("Prénom")
             with col_u2:
-                # Nom n'est plus forcé d'être "required=True"
                 last_name = st.text_input("Nom")
                 role = st.selectbox("Rôle", ROLES)
             with col_u3:
                 title = st.selectbox("Titre", TITLES)
-                # Assurez-vous que les maisons existent avant de les sélectionner
                 available_houses = get_all_houses()
                 house_id = st.selectbox("Foyer Associé", available_houses.keys(), format_func=get_house_name, disabled=not available_houses)
                 
             if st.form_submit_button("Créer l'Utilisateur", type="primary"):
-                # VALIDATION MANUELLE
                 if not new_uid or not first_name or not last_name:
                     st.error("L'ID Utilisateur, le Prénom et le Nom sont obligatoires.")
                 elif db.collection(COL_USERS).document(new_uid).get().exists:
@@ -672,8 +756,8 @@ def admin_interface():
                         'title': title,
                         'role': role,
                         'house_id': house_id,
-                        'password_hash': hash_password(DEFAULT_PASSWORD), # Hachage du mot de passe par défaut
-                        'must_change_password': True, # Forcer le changement à la première connexion
+                        'password_hash': hash_password(DEFAULT_PASSWORD), 
+                        'must_change_password': True, 
                         'created_at': datetime.now().isoformat()
                     }
                     try:
@@ -700,7 +784,6 @@ def admin_interface():
                 house_to_delete = st.selectbox("ID Foyer à Supprimer", houses.keys(), key="del_house_select")
                 
                 if st.button(f"Confirmer la Suppression de {house_to_delete}", key="confirm_del_house", type="secondary"):
-                    # La fonction delete_house gère la vérification des dépendances
                     delete_house(house_to_delete)
         else:
             st.info("Aucun foyer enregistré.")
@@ -708,13 +791,10 @@ def admin_interface():
         st.markdown("---")
         st.subheader("Ajouter un Nouveau Foyer")
         with st.form("new_house_form", clear_on_submit=True):
-            # ID Foyer n'est plus forcé d'être "required=True"
             house_id = st.text_input("ID Foyer (Unique)")
-            # Nom Foyer n'est plus forcé d'être "required=True"
             house_name = st.text_input("Nom du Foyer (Ex: Maison Bleue)")
             
             if st.form_submit_button("Créer le Foyer", type="primary"):
-                # VALIDATION MANUELLE
                 if not house_id or not house_name:
                     st.error("L'ID et le Nom du Foyer sont obligatoires.")
                 elif db.collection(COL_HOUSES).document(house_id).get().exists:
@@ -737,7 +817,6 @@ def admin_interface():
         user_ids = list(users.keys())
         
         if user_ids:
-            # Créer une liste de sélection plus lisible
             user_options = {uid: f"{users[uid].get('first_name', uid)} ({uid})" for uid in user_ids}
             selected_user_id = st.selectbox("Sélectionner l'Utilisateur", user_ids, format_func=lambda uid: user_options[uid], key="allocation_user_select")
             
@@ -750,23 +829,94 @@ def admin_interface():
             
             if st.button("Mettre à jour l'Allocation", type="primary"):
                 if selected_user_id and users.get(selected_user_id, {}).get('house_id'):
-                    # La fonction set_monthly_allocation met à jour l'enregistrement et la transaction de recette
                     set_monthly_allocation(selected_user_id, users[selected_user_id]['house_id'], allocation_amount)
                     st.rerun()
                 else:
                     st.error("Veuillez vérifier que l'utilisateur a un foyer associé.")
         else:
             st.warning("Aucun utilisateur à configurer. Créez un utilisateur d'abord.")
+            
+    # --- TAB 4: GESTION CATÉGORIES ---
+    with tab4:
+        st.header("Gestion des Catégories de Dépenses")
+        categories = get_all_categories()
+        
+        st.subheader("Catégories Actuelles")
+        if categories:
+            # Filtrer les catégories système (comme 'autres' ou 'allocation_mensuelle') pour ne montrer que celles définies par l'utilisateur
+            display_categories = {k: v for k, v in categories.items() if k not in ['autres', 'allocation_mensuelle', 'recette_exceptionnelle']}
+            
+            if display_categories:
+                cat_df = pd.DataFrame(display_categories.values(), index=display_categories.keys(), columns=['Nom Affiché'])
+                st.dataframe(cat_df, use_container_width=True)
+                
+                st.markdown("---")
+                st.subheader("Supprimer une Catégorie")
+                col_del_cat, col_space_cat = st.columns([1, 2])
+                with col_del_cat:
+                    cat_to_delete_id = st.selectbox("ID de Catégorie à Supprimer", display_categories.keys(), key="del_cat_select")
+                    
+                    if st.button(f"Confirmer la Suppression de '{display_categories[cat_to_delete_id]}'", key="confirm_del_cat", type="secondary"):
+                        delete_category(cat_to_delete_id)
+                        st.rerun()
+            else:
+                st.info("Aucune catégorie définie pour l'instant.")
+        else:
+            st.info("Aucune catégorie définie.")
 
+        st.markdown("---")
+        st.subheader("Ajouter/Modifier une Catégorie")
+        with st.form("new_category_form", clear_on_submit=True):
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                category_id = st.text_input("ID Catégorie (Clé unique, sans espaces ni accents)", key="cat_id_input")
+            with col_c2:
+                category_name = st.text_input("Nom Affiché de la Catégorie (ex: 'Frais de nourriture')", key="cat_name_input")
+                
+            if st.form_submit_button("Sauvegarder la Catégorie", type="primary"):
+                if not category_id or not category_name:
+                    st.error("L'ID et le Nom de la Catégorie sont obligatoires.")
+                else:
+                    save_category(category_id, category_name)
+                    st.rerun()
 
 # -------------------------------------------------------------------
-# --- Logique d'Authentification et Flux Principal
+# --- Logique d'Authentification et Flux Principal (Inchangement)
 # -------------------------------------------------------------------
+
+def password_reset_interface(user_id):
+    """Interface pour forcer un changement de mot de passe à la première connexion."""
+    st.title("🔒 Premier Mot de Passe: Changement Obligatoire")
+    st.warning("Pour des raisons de sécurité, veuillez définir un nouveau mot de passe.")
+    
+    new_password = st.text_input("Nouveau Mot de Passe", type="password", key="new_pw_reset")
+    confirm_password = st.text_input("Confirmer le Nouveau Mot de Passe", type="password", key="confirm_pw_reset")
+
+    if st.button("Changer le Mot de Passe", type="primary"):
+        if new_password != confirm_password:
+            st.error("Les mots de passe ne correspondent pas.")
+        elif len(new_password) < 6:
+            st.error("Le mot de passe doit contenir au moins 6 caractères.")
+        else:
+            try:
+                hashed_new_password = hash_password(new_password)
+                
+                db.collection(COL_USERS).document(user_id).update({
+                    'password_hash': hashed_new_password,
+                    'must_change_password': False 
+                })
+                
+                st.success("Mot de passe mis à jour avec succès! Veuillez vous reconnecter.")
+                st.session_state.clear()
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
+
 
 def authentication_and_main_flow():
     """Gère l'authentification et l'affichage de l'interface principale."""
     
-    # 1. Vérification et initialisation de l'état de la session
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
         st.session_state['role'] = None
@@ -776,35 +926,28 @@ def authentication_and_main_flow():
         st.session_state['must_change_password'] = False
 
 
-    # 2. Formulaire de Connexion
     if not st.session_state['logged_in']:
         
         st.header("Connexion au Portail de Gestion")
         
-        # Pour la démo, on utilise l'ID utilisateur comme clé de document Firestore
         with st.form("login_form"):
             st.subheader("Identifiez-vous")
             username = st.text_input("Nom d'utilisateur (votre ID unique)", key="login_username_input")
             password = st.text_input("Mot de passe", type="password", key="login_password_input") 
             
             if st.form_submit_button("Se Connecter", type="primary"):
-                # Récupérer les données de l'utilisateur
                 try:
-                    # Recherche du document dans la collection smmd_users
                     user_doc = db.collection(COL_USERS).document(username).get()
                     if user_doc.exists:
                         user_data = user_doc.to_dict()
                         hashed_pw = user_data.get('password_hash', '')
                         
-                        # Vérification du mot de passe
                         if check_password(password, hashed_pw):
-                            # Connexion réussie : mettre à jour la session
                             st.session_state['logged_in'] = True
                             st.session_state['user_id'] = username
                             st.session_state['user_data'] = user_data
                             st.session_state['role'] = user_data.get('role', 'utilisateur')
                             st.session_state['house_id'] = user_data.get('house_id')
-                            # Utiliser False par défaut si le champ n'existe pas
                             st.session_state['must_change_password'] = user_data.get('must_change_password', False)
 
                             st.success(f"Bienvenue, {user_data.get('first_name')}!")
@@ -816,18 +959,14 @@ def authentication_and_main_flow():
                 except Exception as e:
                     st.error(f"Erreur de connexion : {e}")
             
-        # Afficher la note sur le mot de passe par défaut
         st.caption(f"Note: Le mot de passe par défaut pour les nouveaux utilisateurs est : `{DEFAULT_PASSWORD}`")
 
 
-    # 3. Logique post-connexion
     else:
-        # Bouton de Déconnexion dans la barre latérale
         if st.sidebar.button("Déconnexion", type="secondary"):
             st.session_state.clear()
             st.rerun()
 
-        # Affichage du statut
         st.sidebar.markdown(f"""
             **Connecté en tant que :** {st.session_state['user_data'].get('first_name')} 
             **Rôle :** {st.session_state['role'].capitalize()} 
@@ -835,17 +974,12 @@ def authentication_and_main_flow():
         """)
         st.sidebar.markdown("---")
 
-        # Si l'utilisateur doit changer son mot de passe
         if st.session_state.get('must_change_password', False):
             password_reset_interface(st.session_state['user_id'])
             
-        # Sinon, afficher l'interface principale selon le rôle
         else:
-            # L'Admin a toujours son propre panneau
             if st.session_state['role'] == 'admin':
                 admin_interface()
-            # Les rôles 'utilisateur' et 'chef_de_maison' utilisent le même tableau de bord, 
-            # mais le chef de maison a des fonctionnalités supplémentaires.
             else: 
                 user_dashboard()
 
