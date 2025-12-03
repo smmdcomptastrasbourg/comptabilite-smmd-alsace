@@ -5,8 +5,10 @@ from firebase_admin import initialize_app, credentials, firestore, exceptions
 from datetime import datetime, date, timedelta
 import pandas as pd
 import bcrypt
-from functools import lru_cache 
-import io 
+from functools import lru_cache
+import io
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 # -------------------------------------------------------------------
 # --- 1. Initialisation Firebase ---
@@ -101,761 +103,611 @@ TX_TYPE_MAP = {
     'depense_commune': 'Dépense Commune (Fonds Maison)',
     'depense_avance': 'Avance de Fonds (Remboursement requis)',
     'recette_mensuelle': 'Recette (Allocation Mensuelle)',
-    'recette_exceptionnelle': 'Recette (Exceptionnelle)',
-    'remboursement': 'Remboursement d\'Avance',
+    'avance_personnelle': 'Avance de Fonds Personnel',
 }
 
 # -------------------------------------------------------------------
-# --- 3. Fonctions Utilitaires Firestore ---
+# --- INITIALISATION FIREBASE & UTILITAIRES DE BASE
 # -------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
-def get_categories():
-    """Récupère et cache toutes les catégories depuis Firestore."""
-    if not db: return {}
+# Initialisation de Firebase une seule fois
+if 'firebase_app_initialized' not in st.session_state:
+    try:
+        # Tente de charger les informations du compte de service à partir de la variable d'environnement
+        firebase_service_account_info = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+        
+        if firebase_service_account_info:
+            cred_json = json.loads(firebase_service_account_info)
+            cred = credentials.Certificate(cred_json)
+            initialize_app(cred)
+            st.session_state["db"] = firestore.client()
+            st.session_state['firebase_app_initialized'] = True
+        else:
+            st.error("Erreur: La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' n'est pas configurée.")
+            st.stop()
+            
+    except Exception as e:
+        st.error(f"Erreur critique lors de l'initialisation de Firebase: {e}")
+        st.stop()
+
+db = st.session_state.get("db")
+
+
+# --- UTILS CRYPTOGRAPHIE ---
+@st.cache_data
+def hash_password(password):
+    """Hashe un mot de passe pour le stockage."""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def check_password(password, hashed_password):
+    """Vérifie si le mot de passe correspond au hash."""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+# --- UTILS FIREBASE ---
+
+@lru_cache(maxsize=32)
+def get_house_name(house_id):
+    """Récupère le nom de la Maison à partir de son ID."""
+    if not db or not house_id:
+        return "N/A"
+    try:
+        house_doc = db.collection(COL_HOUSES).document(house_id).get()
+        if house_doc.exists:
+            return house_doc.to_dict().get('name', house_id)
+        return "Maison Inconnue"
+    except Exception:
+        return "Erreur DB Maison"
+
+def get_all_houses():
+    """Récupère tous les documents de Maison."""
+    if not db:
+        return []
+    try:
+        docs = db.collection(COL_HOUSES).stream()
+        return [{"id": doc.id, **doc.to_dict()} for doc in docs]
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des Maisons: {e}")
+        return []
+
+def get_all_categories():
+    """Récupère toutes les catégories de dépenses."""
+    if not db:
+        return []
     try:
         docs = db.collection(COL_CATEGORIES).stream()
-        # Assurez-vous que l'ID du document est la clé et le 'name' la valeur
-        categories = {doc.id: doc.to_dict().get('name', 'N/A') for doc in docs}
-        return categories
-    except Exception:
-        return {} 
-
-@st.cache_data(ttl=3600)
-def get_house_name(house_id):
-    """Retourne le nom de la maison depuis Firestore."""
-    if not db or not house_id: return "Maison Inconnue"
-    try:
-        doc = db.collection(COL_HOUSES).document(house_id).get()
-        return doc.to_dict().get('name', 'Maison Inconnue') if doc.exists else 'Maison Inconnue'
-    except Exception:
-        return "Maison Inconnue"
-
-@st.cache_data(ttl=3600)
-def get_all_users_for_house(house_id):
-    """Récupère tous les utilisateurs d'une maison (pour les jointures et la connexion)."""
-    if not db or not house_id: return {}
-    try:
-        docs = db.collection(COL_USERS).where('house_id', '==', house_id).stream()
-        users = {doc.id: doc.to_dict() for doc in docs}
-        return users
-    except Exception:
-        return {}
-    
-def get_user_name_by_id(user_id):
-    """Récupère le prénom et nom d'un utilisateur par ID (utilise les données mises en cache si possible)."""
-    # Si l'utilisateur actuel est celui demandé
-    if user_id == st.session_state.get('user_id'):
-        data = st.session_state.get('user_data', {})
-        return f"{data.get('first_name', 'Utilisateur')} {data.get('last_name', '')}".strip()
-        
-    # Sinon, on doit charger les utilisateurs de la maison
-    house_id = st.session_state.get('house_id')
-    users_data = get_all_users_for_house(house_id)
-    user_info = users_data.get(user_id, {})
-    return f"{user_info.get('first_name', 'Utilisateur')} {user_info.get('last_name', '')}".strip()
-
-@st.cache_data(ttl=30)
-def get_transactions_for_house(house_id):
-    """
-    RÉEL BDD: Récupère toutes les transactions de la maison depuis Firestore.
-    """
-    if not db or not house_id: return pd.DataFrame()
-    
-    try:
-        docs = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
-        data = []
-        for doc in docs:
-            tx = doc.to_dict()
-            tx['id'] = doc.id
-            data.append(tx)
-
-        if not data: return pd.DataFrame()
-        
-        df = pd.DataFrame(data)
-        
-        # Conversion des timestamps Firestore en datetime Python
-        if 'date' in df.columns:
-             # Tente de convertir en datetime, gère les cas où c'est déjà une datetime ou un Timestamp Firestore
-             df['date'] = df['date'].apply(
-                lambda x: x.astimezone(None) if hasattr(x, 'astimezone') else \
-                          datetime.fromtimestamp(x.seconds + x.nanoseconds / 1e9) if hasattr(x, 'seconds') else x if hasattr(x, 'seconds') else x
-             )
-        
-        # Jointures avec les utilisateurs et catégories (en utilisant les fonctions utilitaires)
-        categories = get_categories()
-        
-        df['category_name'] = df['category'].apply(lambda cid: categories.get(cid, 'N/A'))
-        df['full_name'] = df['user_id'].apply(get_user_name_by_id)
-        
-        # Tri
-        return df.sort_values('date', ascending=False)
-    
+        return [{"id": doc.id, **doc.to_dict()} for doc in docs]
     except Exception as e:
-        # st.error(f"Erreur lors de la récupération des transactions: {e}")
-        return pd.DataFrame()
+        st.error(f"Erreur lors de la récupération des catégories: {e}")
+        return []
 
-def get_user_transactions(house_id, user_id):
-    """Filtre les transactions de la maison pour un utilisateur donné."""
-    df = get_transactions_for_house(house_id)
-    return df[df['user_id'] == user_id].copy()
-
-# -------------------------------------------------------------------
-# --- 4. Fonctions de Gestion des Transactions (CRUD) ---
-# -------------------------------------------------------------------
-
-def delete_transaction(transaction_id, house_id, user_id, user_role):
-    """
-    Supprime une transaction si l'utilisateur est autorisé. (Firestore Implémentation)
-    """
-    if not db: return False, "Erreur: Connexion BDD non établie."
-    
+def get_user_info(user_id):
+    """Récupère les données utilisateur à partir de l'ID."""
+    if not db or not user_id:
+        return None
     try:
-        # 1. Vérifier les permissions
-        # On utilise une requête directe pour vérifier la transaction si le cache n'est pas fiable/disponible
-        doc_ref = db.collection(COL_TRANSACTIONS).document(transaction_id)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-             return False, "Transaction introuvable ou déjà supprimée."
-        
-        transaction_data = doc.to_dict()
+        doc = db.collection(COL_USERS).document(user_id).get()
+        return doc.to_dict() if doc.exists else None
+    except Exception:
+        return None
 
-        is_author = transaction_data.get('user_id') == user_id
-        # Le chef de maison et l'admin peuvent annuler n'importe quelle transaction de leur maison
-        is_house_admin = user_role == 'chef_de_maison' and transaction_data.get('house_id') == house_id
-        is_admin = user_role == 'admin'
+# -------------------------------------------------------------------
+# --- INTERFACES UTILISATEUR & ADMINISTRATEUR (Définitions) ---
+# -------------------------------------------------------------------
 
-        if is_author or is_house_admin or is_admin:
-            # 2. Suppression Firestore
-            doc_ref.delete() 
-            
-            # Invalider le cache
-            get_transactions_for_house.clear() 
-            return True, f"Transaction #{transaction_id[:6]}... annulée avec succès."
+def password_reset_interface(user_id):
+    """Interface de réinitialisation de mot de passe forcée."""
+    st.header("Réinitialisation du Mot de Passe")
+    st.warning("Vous devez changer votre mot de passe pour des raisons de sécurité.")
+
+    with st.form("password_reset_form"):
+        new_password = st.text_input("Nouveau mot de passe", type="password")
+        confirm_password = st.text_input("Confirmer le mot de passe", type="password")
+        
+        submitted = st.form_submit_button("Changer le mot de passe", type="primary")
+
+        if submitted:
+            if not new_password or not confirm_password:
+                st.error("Veuillez remplir tous les champs.")
+            elif new_password != confirm_password:
+                st.error("Les mots de passe ne correspondent pas.")
+            else:
+                try:
+                    hashed_pwd = hash_password(new_password)
+                    db.collection(COL_USERS).document(user_id).update({
+                        'password': hashed_pwd,
+                        'must_change_password': False
+                    })
+                    st.success("Mot de passe changé avec succès. Veuillez vous reconnecter.")
+                    st.session_state.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
+
+
+def user_dashboard():
+    """Tableau de bord de l'utilisateur standard (sans fonctions d'admin)."""
+    st.header(f"Bienvenue, {st.session_state['user_data'].get('first_name')}!")
+    st.info("Cette section est réservée aux fonctionnalités de base (saisie de dépenses, vue des transactions de la maison).")
+    
+    # Simple navigation par onglets pour l'utilisateur
+    tab1, tab2 = st.tabs(["Saisie de Dépense", "Mes Transactions"])
+
+    with tab1:
+        st.subheader("Nouvelle Transaction")
+        transaction_form(st.session_state['user_id'], st.session_state['house_id'])
+        
+    with tab2:
+        st.subheader("Historique des Transactions de votre Maison")
+        # Afficher les transactions de la Maison (simplifié)
+        house_transactions = get_house_transactions(st.session_state['house_id'])
+        if house_transactions:
+            df = pd.DataFrame(house_transactions)
+            df = format_transaction_df(df)
+            st.dataframe(df, use_container_width=True)
         else:
-            return False, "Vous n'avez pas la permission d'annuler cette transaction."
+            st.info("Aucune transaction enregistrée pour votre Maison.")
 
-    except Exception as e:
-        return False, f"Erreur lors de l'annulation de la transaction : {e}"
 
-def validate_advance(transaction_id, house_id, validator_user_id):
-    """Valide une dépense de type 'avance' (Firestore Implémentation)."""
-    if not db: return False, "Erreur: Connexion BDD non établie."
+def transaction_form(user_id, house_id):
+    """Formulaire unifié de saisie de transaction."""
+    all_categories = get_all_categories()
+    category_options = {c['name']: c['id'] for c in all_categories}
 
-    try:
-        doc_ref = db.collection(COL_TRANSACTIONS).document(transaction_id)
-        doc = doc_ref.get()
+    with st.form("new_transaction_form", clear_on_submit=True):
+        st.subheader("Détails de la Transaction")
         
-        if not doc.exists:
-             return False, "Avance introuvable."
+        col_type, col_date = st.columns(2)
         
-        transaction_data = doc.to_dict()
-
-        if transaction_data.get('house_id') != house_id:
-            return False, "Cette avance n'appartient pas à votre maison."
-        if transaction_data.get('type') != 'depense_avance':
-            return False, "Ce n'est pas un type de transaction 'avance'."
-        if transaction_data.get('statut_avance') == 'validée':
-            return False, "Cette avance est déjà validée."
-
-        # Mise à jour du statut dans Firestore
-        doc_ref.update({
-            'statut_avance': 'validée', 
-            'validator_id': validator_user_id,
-            'validated_at': datetime.now()
-        })
-        
-        # Invalider le cache
-        get_transactions_for_house.clear() 
-        return True, f"Avance de {transaction_data.get('amount', 0)} € validée avec succès."
-
-    except Exception as e:
-        return False, f"Erreur lors de la validation de l'avance : {e}"
-
-# -------------------------------------------------------------------
-# --- 5. Export de Données (Excel) ---
-# -------------------------------------------------------------------
-
-def generate_excel_report(df_all: pd.DataFrame, house_name: str) -> bytes:
-    """
-    Génère un rapport Excel structuré et lisible à partir du DataFrame de transactions.
-    """
-    
-    if df_all.empty:
-        # Créer un DataFrame vide avec la structure désirée si aucune donnée n'est trouvée
-        report_df = pd.DataFrame(columns=['ID_Transaction', 'Date_Transaction', 'Type_Transaction', 
-                                          'Montant_EUR', 'Effectué_Par', 'Description', 
-                                          'Catégorie', 'Moyen_Paiement', 'Statut_Avance', 
-                                          'ID_Utilisateur', 'ID_Maison', 'Date_Saisie', 
-                                          'ID_Validateur', 'Date_Validation'])
-    else:
-        # Préparation du DataFrame pour l'export
-        report_df = df_all.copy()
-        
-        # Renommage des colonnes pour la clarté en français
-        report_df = report_df.rename(columns={
-            'id': 'ID_Transaction',
-            'date': 'Date_Transaction',
-            'type': 'Type_Transaction_Code', # On garde le code pour l'analyse
-            'amount': 'Montant_EUR',
-            'full_name': 'Effectué_Par',
-            'description': 'Description',
-            'category_name': 'Catégorie',
-            'payment_method': 'Moyen_Paiement',
-            'statut_avance': 'Statut_Avance_Code', # On garde le code pour l'analyse
-            'user_id': 'ID_Utilisateur',
-            'house_id': 'ID_Maison',
-            'created_at': 'Date_Saisie',
-            'validator_id': 'ID_Validateur',
-            'validated_at': 'Date_Validation',
-        })
-        
-        # Création de colonnes lisibles
-        report_df.insert(3, 'Type_Transaction', report_df['Type_Transaction_Code'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre')))
-        report_df.insert(10, 'Statut_Avance', report_df['Statut_Avance_Code'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A')))
-
-        # Sélection et ordre des colonnes
-        cols_final = [
-            'ID_Transaction', 'Date_Transaction', 'Type_Transaction', 'Montant_EUR', 
-            'Effectué_Par', 'Catégorie', 'Description', 'Moyen_Paiement', 
-            'Statut_Avance', 'ID_Utilisateur', 'ID_Maison', 'Date_Saisie', 
-            'ID_Validateur', 'Date_Validation', 'Type_Transaction_Code', 'Statut_Avance_Code'
-        ]
-        
-        report_df = report_df.reindex(columns=cols_final)
-        
-        # Formatage des dates pour Excel (facultatif mais plus propre)
-        for col in ['Date_Transaction', 'Date_Saisie', 'Date_Validation']:
-            if col in report_df.columns:
-                 # Assurez-vous que les colonnes de date sont bien des datetime avant de formater
-                report_df[col] = pd.to_datetime(report_df[col], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
-    
-    # Génération du fichier Excel en mémoire
-    output = io.BytesIO()
-    # Utilisation de XlsxWriter comme moteur pour gérer les encodages
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        report_df.to_excel(writer, sheet_name='Transactions', index=False, encoding='utf-8')
-    
-    return output.getvalue()
-
-
-# -------------------------------------------------------------------
-# --- 6. Interfaces Utilisateur et Logique ---
-# -------------------------------------------------------------------
-
-def log_transaction(user_id, house_id, house_name):
-    """ Interface de saisie de dépense / recette """
-    st.subheader(f"Saisir une Transaction pour {house_name}")
-    
-    categories = get_categories() 
-    if not categories:
-        st.warning("Impossible de charger les catégories. Vérifiez la collection 'smmd_categories' dans Firestore.")
-        return
-
-    category_options = sorted(list(categories.values()))
-    category_map = {v: k for k, v in categories.items()}
-    
-    with st.form("transaction_form", clear_on_submit=True):
-        st.markdown("##### Détails du Mouvement")
-        col1, col2 = st.columns(2)
-
-        transaction_type = col1.selectbox(
-            "Type de Mouvement",
-            ['Dépense/Avance', 'Recette Exceptionnelle']
+        # Le type de transaction n'inclut pas les recettes mensuelles ici
+        tx_options = {k: v for k, v in TX_TYPE_MAP.items() if k != 'recette_mensuelle'}
+        transaction_type = col_type.selectbox(
+            "Type de Transaction", 
+            options=list(tx_options.keys()), 
+            format_func=lambda x: tx_options[x]
         )
         
-        amount = col2.number_input("Montant (€)", min_value=0.01, format="%.2f")
+        transaction_date = col_date.date_input("Date de la Transaction", value=date.today())
         
-        payment_method = st.selectbox(
-            "Moyen de Paiement",
-            options=PAYMENT_METHODS,
-            help="Paiement par la Maison = **Dépense Commune**. Paiement Personnel = **Avance de Fonds** (validation chef requise)."
-        )
+        amount = st.number_input("Montant (€)", min_value=0.01, format="%.2f")
+        description = st.text_area("Description / Objet de la dépense")
 
-        category_name = st.selectbox("Catégorie", options=['N/A'] + category_options)
+        col_method, col_category = st.columns(2)
+        method = col_method.selectbox("Méthode de Paiement", PAYMENT_METHODS)
+        category_name = col_category.selectbox("Catégorie de Dépense", list(category_options.keys()))
+        category_id = category_options.get(category_name)
         
-        description = st.text_area("Description Détaillée")
-        
-        # Assurer que l'objet datetime.date est utilisé pour éviter les erreurs de sérialisation
-        date_saisie = st.date_input("Date de la transaction", value=date.today())
+        # Logique spécifique pour les avances de fonds personnels
+        if transaction_type == 'avance_personnelle':
+            st.warning("Ceci est une Avance Personnelle (Ex: avance d'argent à un membre qui sera remboursée plus tard).")
+            # Logique d'avance (simplifiée pour cet exemple)
         
         submitted = st.form_submit_button("Enregistrer la Transaction", type="primary")
 
         if submitted:
-            if amount <= 0:
-                st.error("Le montant doit être supérieur à zéro.")
-                return
+            if amount <= 0 or not description or not category_id:
+                st.error("Veuillez remplir tous les champs obligatoires.")
+            else:
+                try:
+                    new_tx = {
+                        'type': transaction_type,
+                        'amount': amount,
+                        'description': description,
+                        'date': transaction_date.isoformat(),
+                        'method': method,
+                        'category_id': category_id,
+                        'house_id': house_id,
+                        'user_id': user_id,
+                        'created_at': datetime.now().isoformat(),
+                        'is_validated': False # Seules les avances sont validées, mais on garde le champ pour la cohérence
+                    }
+                    
+                    db.collection(COL_TRANSACTIONS).add(new_tx)
+                    st.success("Transaction enregistrée avec succès!")
+                except Exception as e:
+                    st.error(f"Erreur lors de l'enregistrement: {e}")
 
-            # LOGIQUE CRITIQUE: Classification Dépense/Avance
-            tx_type_firestore = ''
-            statut_avance = 'validée'
-            
-            if transaction_type == 'Recette Exceptionnelle':
-                tx_type_firestore = 'recette_exceptionnelle'
-            
-            elif payment_method in PAYMENT_METHODS_HOUSE:
-                tx_type_firestore = 'depense_commune'
-            
-            elif payment_method in PAYMENT_METHODS_PERSONAL:
-                tx_type_firestore = 'depense_avance'
-                statut_avance = 'en_attente'
 
-            # --------------------------------------------------------------------------
+def admin_transaction_management():
+    """Interface de gestion complète des transactions pour l'administrateur."""
+    st.header("Gestion Complète des Transactions")
+    
+    # Récupérer toutes les transactions (simplifié pour cet exemple)
+    all_transactions = get_all_transactions()
+    
+    if not all_transactions:
+        st.info("Aucune transaction n'a été enregistrée.")
+        return
 
-            transaction_data = {
-                'house_id': house_id,
-                'user_id': user_id,
-                'type': tx_type_firestore,
-                'amount': amount,
-                'category': category_map.get(category_name) if category_name != 'N/A' else 'N/A',
-                'description': description,
-                'payment_method': payment_method,
-                'date': datetime.combine(date_saisie, datetime.min.time()),
-                'created_at': datetime.now(),
-                'statut_avance': statut_avance 
-            }
-            
+    df = pd.DataFrame(all_transactions)
+    df = format_transaction_df(df, detailed=True)
+    
+    st.subheader("Filtres et Visualisation")
+    
+    # Ajout d'une fonctionnalité d'export Excel
+    excel_data = df_to_excel_bytes(df)
+    st.download_button(
+        label="Exporter en Excel (.xlsx)",
+        data=excel_data,
+        file_name="transactions_export.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary"
+    )
+
+    st.dataframe(df, use_container_width=True)
+
+    # Logique d'édition/suppression simplifiée (à développer)
+    with st.expander("Actions Administratives (Édition/Suppression)"):
+        st.write("Fonctionnalités à venir : Édition et suppression par ID.")
+
+
+def advance_validation_interface():
+    """Interface pour la validation des avances de fonds (remboursements)."""
+    st.header("Validation des Avances de Fonds")
+    st.info("Affiche les transactions de type 'depense_avance' en attente de validation.")
+    
+    # Filtre les transactions pour les avances non validées
+    if not db:
+        st.error("Base de données non initialisée.")
+        return
+
+    try:
+        advances_query = db.collection(COL_TRANSACTIONS).where('type', '==', 'depense_avance').where('is_validated', '==', False).stream()
+        advances = [{"id": doc.id, **doc.to_dict()} for doc in advances_query]
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des avances: {e}")
+        return
+
+    if not advances:
+        st.success("Aucune avance en attente de validation.")
+        return
+
+    df = pd.DataFrame(advances)
+    df = format_transaction_df(df, detailed=True)
+    
+    st.dataframe(df, use_container_width=True)
+
+    # Logique de validation
+    st.subheader("Valider une Avance")
+    
+    advance_id = st.text_input("Entrez l'ID de l'avance à valider (colonne 'ID')")
+    
+    if st.button("Valider l'Avance", type="primary"):
+        if advance_id in df['ID'].values:
             try:
-                # Enregistrement Firestore réel
-                db.collection(COL_TRANSACTIONS).add(transaction_data) 
-                
-                get_transactions_for_house.clear() # Invalider le cache
-
-                msg = f"Transaction enregistrée ! Type: {TX_TYPE_MAP.get(tx_type_firestore)}"
-                if statut_avance == 'en_attente':
-                    msg += " (⚠️ **Avance en attente de validation** par le Chef de Maison)."
-                st.success(msg)
+                db.collection(COL_TRANSACTIONS).document(advance_id).update({'is_validated': True})
+                st.success(f"Avance {advance_id} marquée comme validée.")
                 st.rerun()
-
             except Exception as e:
-                st.error(f"Erreur d'enregistrement dans Firestore : {e}")
+                st.error(f"Erreur lors de la validation: {e}")
+        else:
+            st.error("ID d'avance invalide ou non trouvé dans la liste.")
 
-def allocation_management(user_id):
-    """ Interface de gestion de l'allocation mensuelle """
-    st.subheader("⚙️ Gestion de votre Allocation Mensuelle")
-    st.info("Cette fonction nécessite une logique de BDD dédiée pour la collection `smmd_allocations` et n'est actuellement qu'une simulation.")
+
+def admin_user_management():
+    """Interface de gestion des utilisateurs (création, modification de rôle/maison)."""
+    st.header("Gestion des Utilisateurs")
     
-    # Simulation des données (à remplacer par une lecture/écriture Firestore sur COL_ALLOCATIONS)
-    current_allocation = 350.0 
-    
-    with st.form("allocation_form"):
-        new_amount = st.number_input(
-            "Montant de l'allocation mensuelle (€)", 
-            min_value=0.0, 
-            value=current_allocation, 
-            step=50.0,
-            format="%.2f"
-        )
-        submitted = st.form_submit_button("Sauvegarder l'Allocation", type="primary")
-        
-        if submitted:
-             # Simulation de l'écriture BDD
-             st.success(f"Simulation: Allocation mensuelle mise à jour à {new_amount} € dans la BDD.")
+    # Onglets pour créer et gérer
+    tab_create, tab_manage = st.tabs(["Créer un Utilisateur", "Liste & Modifier"])
 
-def user_transaction_history_and_cancellation(house_id, user_id, user_role):
-    """Affiche l'historique et permet l'annulation des transactions pour l'utilisateur."""
-    st.subheader("Historique de vos dépenses et avances")
+    # --- Onglet Création ---
+    with tab_create:
+        st.subheader("Ajouter un Nouvel Utilisateur")
+        all_houses = get_all_houses()
+        house_options = {h['name']: h['id'] for h in all_houses}
 
-    # 1. Récupérer les transactions de l'utilisateur (Firestore)
-    user_transactions_df = get_user_transactions(house_id, user_id)
-    
-    if user_transactions_df.empty:
-        st.info("Vous n'avez pas encore saisi de transactions.")
-        return
-
-    # Préparer le DataFrame pour l'affichage
-    display_df = user_transactions_df.copy()
-    display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
-    display_df['Type'] = display_df['type'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre'))
-    display_df['Catégorie'] = display_df['category_name']
-    display_df['Statut Avance'] = display_df['statut_avance'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A'))
-    display_df['Transaction_ID'] = display_df['id']
-
-    cols_to_show = ['date', 'Type', 'Montant', 'Catégorie', 'description', 'payment_method', 'Statut Avance', 'Transaction_ID']
-    display_df = display_df[cols_to_show].rename(columns={
-        'date': 'Date', 
-        'description': 'Description', 
-        'payment_method': 'Moyen de Paiement'
-    }).sort_values('Date', ascending=False)
-    
-    st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
-
-    st.markdown("#### 🗑️ Annuler une Saisie Récente")
-    st.caption("Vous pouvez annuler toute transaction que vous avez saisie.")
-    
-    annulable_df = display_df.copy()
-
-    if not annulable_df.empty:
-        with st.form("form_annulation_transaction", clear_on_submit=True):
-            col1, col2 = st.columns([3, 1])
+        with st.form("new_user_form", clear_on_submit=True):
+            col_id, col_name = st.columns(2)
+            user_id = col_id.text_input("ID Utilisateur (Email sans @domaine.com)")
+            first_name = col_name.text_input("Prénom")
             
-            # S'assurer que seules les transactions de cet utilisateur sont dans la liste
-            transaction_to_delete = col1.selectbox(
-                "Sélectionnez la transaction à annuler :",
-                options=annulable_df['Transaction_ID'].tolist(),
-                # Utiliser .dt.strftime pour formater la date si c'est un datetime
-                format_func=lambda id: f"{annulable_df[annulable_df['Transaction_ID'] == id]['Date'].iloc[0].strftime('%Y-%m-%d')} - {annulable_df[annulable_df['Transaction_ID'] == id]['Montant'].iloc[0]} ({annulable_df[annulable_df['Transaction_ID'] == id]['Description'].iloc[0][:30]}...)"
-            )
+            col_role, col_house = st.columns(2)
+            role = col_role.selectbox("Rôle", ROLES)
+            house_name = col_house.selectbox("Maison", list(house_options.keys()))
+            house_id = house_options.get(house_name)
             
-            submitted = col2.form_submit_button("Annuler la Dépense", type="secondary")
+            submitted = st.form_submit_button("Créer l'Utilisateur", type="primary")
 
-            if submitted and transaction_to_delete:
-                success, message = delete_transaction(
-                    transaction_to_delete, 
-                    house_id,
-                    user_id,
-                    user_role
-                )
-
-                if success:
-                    st.success(message)
-                    st.rerun()
+            if submitted:
+                if not user_id or not first_name or not house_id:
+                    st.error("Veuillez remplir tous les champs.")
                 else:
-                    st.error(message)
-    else:
-        st.info("Aucune transaction à annuler trouvée.")
+                    try:
+                        # Assurez-vous que l'ID n'est pas déjà pris
+                        if db.collection(COL_USERS).document(user_id).get().exists:
+                            st.error(f"L'ID utilisateur '{user_id}' existe déjà.")
+                        else:
+                            new_user = {
+                                'first_name': first_name,
+                                'role': role,
+                                'house_id': house_id,
+                                'password': hash_password(DEFAULT_PASSWORD), # Hash du mot de passe par défaut
+                                'must_change_password': True, # Force le changement au premier login
+                                'is_active': True,
+                                'created_at': datetime.now().isoformat()
+                            }
+                            db.collection(COL_USERS).document(user_id).set(new_user)
+                            st.success(f"Utilisateur {first_name} créé avec l'ID : `{user_id}`. Mot de passe par défaut : `{DEFAULT_PASSWORD}`")
+                    except Exception as e:
+                        st.error(f"Erreur lors de la création de l'utilisateur: {e}")
 
-def user_dashboard():
-    """ Tableau de bord utilisateur """
-    user_id = st.session_state['user_id']
-    house_id = st.session_state['house_id']
-    user_role = st.session_state['role']
-    house_name = get_house_name(house_id)
-    
-    st.title(f"Tableau de Bord de la Maison {house_name}")
-    
-    st.markdown("---")
-    
-    tab1, tab2, tab3 = st.tabs(["Saisie Transaction", "Historique & Annulation", "Allocation Mensuelle"])
-    
-    with tab1:
-        log_transaction(user_id, house_id, house_name) 
+    # --- Onglet Gestion ---
+    with tab_manage:
+        st.subheader("Liste et Modification")
+        users = [{"id": doc.id, **doc.to_dict()} for doc in db.collection(COL_USERS).stream()]
         
-    with tab3:
-        allocation_management(user_id)
+        if users:
+            df = pd.DataFrame(users)
+            df['Maison'] = df['house_id'].apply(get_house_name)
+            df_display = df[['id', 'first_name', 'role', 'Maison', 'is_active', 'must_change_password', 'created_at']]
+            st.dataframe(df_display, use_container_width=True)
 
-    with tab2:
-        user_transaction_history_and_cancellation(house_id, user_id, user_role)
+            # Logique de modification (simplifiée)
+            st.warning("La modification de rôle/maison se fera par une interface dédiée ou un éditeur de DataFrame à l'avenir.")
 
-def admin_transaction_management(house_id, admin_user_id, admin_user_role):
-    """
-    Interface de gestion/annulation de transactions pour le Chef de Maison.
-    Permet de visualiser et d'annuler n'importe quelle transaction de la maison.
-    """
-    st.header("Gestion et Annulation des Transactions de la Maison")
-    st.info("⚠️ Vous pouvez annuler n'importe quelle transaction de la maison. Cette action est irréversible.")
+
+def admin_house_category_management():
+    """Interface de gestion des Maisons et des Catégories de dépenses."""
+    st.header("Gestion des Maisons et des Catégories")
     
-    df_all = get_transactions_for_house(house_id)
+    tab_house, tab_category = st.tabs(["Gestion des Maisons", "Gestion des Catégories"])
     
-    if df_all.empty:
-        st.info("Aucune transaction enregistrée pour cette maison.")
-        return
+    # --- Onglet Maisons ---
+    with tab_house:
+        st.subheader("Ajouter une Maison")
+        with st.form("new_house_form", clear_on_submit=True):
+            house_id = st.text_input("ID de la Maison (Ex: strasbourg_foyer)")
+            house_name = st.text_input("Nom de la Maison (Ex: Foyer de Strasbourg)")
+            
+            if st.form_submit_button("Ajouter la Maison", type="primary"):
+                if not house_id or not house_name:
+                    st.error("Veuillez remplir tous les champs.")
+                else:
+                    try:
+                        db.collection(COL_HOUSES).document(house_id).set({'name': house_name, 'created_at': datetime.now().isoformat()})
+                        st.success(f"Maison '{house_name}' ajoutée.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur lors de l'ajout de la Maison: {e}")
 
-    # Préparation du DataFrame pour l'affichage
-    display_df = df_all.copy()
-    display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
-    display_df['Type'] = display_df['type'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre'))
-    display_df['Catégorie'] = display_df['category_name']
-    display_df['Statut Avance'] = display_df['statut_avance'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A'))
-    display_df['Transaction_ID'] = display_df['id']
+        st.subheader("Maisons Existantes")
+        houses = get_all_houses()
+        if houses:
+            df = pd.DataFrame(houses)
+            df['ID'] = df['id']
+            st.dataframe(df[['ID', 'name']], use_container_width=True)
 
-    cols_to_show = ['date', 'Type', 'Montant', 'full_name', 'Catégorie', 'description', 'payment_method', 'Statut Avance', 'Transaction_ID']
-    display_df = display_df[cols_to_show].rename(columns={
-        'date': 'Date', 
-        'full_name': 'Saisi par',
-        'description': 'Description', 
-        'payment_method': 'Moyen de Paiement'
-    }).sort_values('Date', ascending=False)
-    
-    st.markdown("##### Toutes les transactions (les plus récentes en premier)")
-    st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
+    # --- Onglet Catégories ---
+    with tab_category:
+        st.subheader("Ajouter une Catégorie de Dépense")
+        with st.form("new_category_form", clear_on_submit=True):
+            category_name = st.text_input("Nom de la Catégorie (Ex: Alimentation, Fournitures de Bureau)")
+            
+            if st.form_submit_button("Ajouter la Catégorie", type="primary"):
+                if not category_name:
+                    st.error("Veuillez entrer un nom.")
+                else:
+                    try:
+                        # Crée un ID basé sur le nom pour l'unicité
+                        category_id = category_name.lower().replace(" ", "_")
+                        db.collection(COL_CATEGORIES).document(category_id).set({'name': category_name, 'created_at': datetime.now().isoformat()})
+                        st.success(f"Catégorie '{category_name}' ajoutée.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur lors de l'ajout de la Catégorie: {e}")
 
-    # Interface d'annulation
-    st.markdown("---")
-    st.markdown("#### 🗑️ Annulation d'une Transaction")
-    
-    with st.form("form_admin_annulation_transaction", clear_on_submit=True):
-        col1, col2 = st.columns([3, 1])
-        
-        transaction_to_delete = col1.selectbox(
-            "Sélectionnez la transaction à annuler :",
-            options=display_df['Transaction_ID'].tolist(),
-            format_func=lambda id: f"{display_df[display_df['Transaction_ID'] == id]['Date'].iloc[0].strftime('%Y-%m-%d')} - {display_df[display_df['Transaction_ID'] == id]['Montant'].iloc[0]} ({display_df[display_df['Transaction_ID'] == id]['Saisi par'].iloc[0]})"
-        )
-        
-        submitted = col2.form_submit_button("Annuler la Transaction SÉLECTIONNÉE", type="secondary")
+        st.subheader("Catégories Existantes")
+        categories = get_all_categories()
+        if categories:
+            df = pd.DataFrame(categories)
+            df['ID'] = df['id']
+            st.dataframe(df[['ID', 'name']], use_container_width=True)
 
-        if submitted and transaction_to_delete:
-            success, message = delete_transaction(
-                transaction_to_delete, 
-                house_id,
-                admin_user_id,
-                admin_user_role # Utilisation du rôle admin/chef pour la permission
-            )
-
-            if success:
-                st.success(message)
-                get_transactions_for_house.clear() # Assurer la mise à jour
-                st.rerun()
-            else:
-                st.error(message)
-
-def advance_validation_interface(house_id, validator_user_id):
-    """ Interface visible uniquement par les Chefs de Maison pour valider les avances. """
-    st.header("✅ Validation des Avances de Fonds")
-    st.markdown("Veuillez valider les avances faites par les utilisateurs avant qu'elles n'affectent le solde à rembourser.")
-
-    
-    # Récupérer toutes les transactions de la maison (Firestore)
-    df_all = get_transactions_for_house(house_id)
-    
-    # Filtrer uniquement les avances en attente
-    display_df = df_all[
-        (df_all['type'] == 'depense_avance') & 
-        (df_all['statut_avance'] == 'en_attente')
-    ].copy()
-    
-    if display_df.empty:
-        st.success("Aucune avance de fonds en attente de validation pour le moment.")
-        return
-
-    # Préparation du DataFrame pour l'affichage
-    display_df['Date'] = display_df['date'].apply(lambda d: d.strftime('%Y-%m-%d') if isinstance(d, datetime) else 'N/A')
-    display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
-    display_df = display_df.rename(columns={
-        'full_name': 'Avancé par', 
-        'description': 'Description',
-        'payment_method': 'Moyen de Paiement',
-        'id': 'Transaction_ID'
-    })
-    
-    cols_to_show = ['Date', 'Montant', 'Avancé par', 'Description', 'Moyen de Paiement', 'Transaction_ID']
-    display_df = display_df[cols_to_show].sort_values('Date', ascending=False)
-    
-    st.warning(f"{len(display_df)} Avance(s) en attente de validation :")
-    st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
-
-    # Interface de validation
-    st.markdown("---")
-    st.markdown("#### Action de Validation")
-    
-    with st.form("form_validation_avance"):
-        col1, col2 = st.columns([3, 1])
-        
-        transaction_to_validate = col1.selectbox(
-            "Sélectionnez la transaction à valider :",
-            options=display_df['Transaction_ID'].tolist(),
-            format_func=lambda id: f"[{id[:6]}...] {display_df[display_df['Transaction_ID'] == id]['Montant'].iloc[0]} par {display_df[display_df['Transaction_ID'] == id]['Avancé par'].iloc[0]}"
-        )
-        
-        submitted = col2.form_submit_button("Valider l'Avance", type="primary")
-
-        if submitted and transaction_to_validate:
-            success, message = validate_advance(
-                transaction_to_validate, 
-                house_id,
-                validator_user_id
-            )
-
-            if success:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
 
 def admin_interface():
-    """ Interface pour Admin général et Chef de Maison """
+    """Interface principale de l'administrateur avec menu de navigation latéral."""
+    st.sidebar.markdown("## Menu Administration")
     
-    st.sidebar.markdown("---")
+    # Le rôle est utilisé ici pour limiter les vues si nécessaire
+    role = st.session_state['role'] 
     
-    role = st.session_state['role']
-    house_id = st.session_state['house_id']
-    user_id = st.session_state['user_id']
-    house_name = get_house_name(house_id)
+    tab_options = {
+        "Accueil Admin": "admin_home",
+        "Gestion Utilisateurs": "admin_user_management",
+        "Gestion Maisons & Catégories": "admin_house_category_management",
+        "Gestion des Transactions": "admin_transaction_management",
+        "Validations d'Avances": "advance_validation_interface",
+    }
     
-    df_all_transactions = get_transactions_for_house(house_id)
-
-
+    # Si l'utilisateur est chef de maison, on pourrait vouloir limiter les options
     if role == 'chef_de_maison':
-        # Menu spécifique pour le Chef de Maison
-        admin_tab = st.sidebar.radio(
-            "Menu Chef de Maison",
-            ['Rapports et Analyse', 'Validation des Avances', 'Gestion des Transactions']
-        )
-        
-        if admin_tab == 'Validation des Avances':
-            advance_validation_interface(house_id, user_id) 
-        
-        elif admin_tab == 'Gestion des Transactions':
-            # Nouvelle fonction pour gérer et annuler toutes les transactions de la maison
-            admin_transaction_management(house_id, user_id, role)
+        # Exemple de restriction pour le Chef de Maison
+        del tab_options["Gestion Utilisateurs"]
+        del tab_options["Gestion Maisons & Catégories"]
 
-        elif admin_tab == 'Rapports et Analyse':
-            st.title(f"Rapports et Analyse pour {house_name}")
-            st.info("Cette section est dédiée aux rapports avancés, aux analyses et à l'export des données.")
-            
-            st.markdown("### 📊 Export des Données")
-            
-            excel_data = generate_excel_report(df_all_transactions, house_name)
-            
-            st.download_button(
-                label="Exporter toutes les transactions en Excel",
-                data=excel_data,
-                file_name=f'transactions_{house_name}_{date.today().strftime("%Y%m%d")}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                type="primary"
-            )
-            st.caption("Le fichier Excel contient toutes les données brutes, y compris les ID et les codes de statut, pour une analyse approfondie.")
 
-            st.markdown("---")
-            st.subheader("Simulations et Solde (À implémenter)")
-            st.info("Contenu des rapports d'analyse financière et budgétaire de la Maison ici.")
-            
-    elif role == 'admin':
-        # Menu spécifique pour l'Admin général
-        admin_tab = st.sidebar.radio(
-            "Menu Administration Générale",
-            ['Gestion Utilisateurs et Maisons', 'Rapports Globaux']
-        )
-        st.title("Panneau d'Administration Général")
-        
-        if admin_tab == 'Gestion Utilisateurs et Maisons':
-             st.info("Outils de gestion globale des maisons, utilisateurs et catégories (Ajouter, Modifier, Supprimer). (À implémenter)")
-        elif admin_tab == 'Rapports Globaux':
-             st.info("Rapports consolidés sur toutes les maisons et l'activité générale. (À implémenter)")
-             st.markdown("### 📊 Export des Données de la Maison")
-             excel_data = generate_excel_report(df_all_transactions, house_name)
-            
-             st.download_button(
-                label=f"Exporter les transactions de {house_name} en Excel",
-                data=excel_data,
-                file_name=f'transactions_{house_name}_{date.today().strftime("%Y%m%d")}.xlsx',
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                type="primary"
-             )
-
-             
-
-# -------------------------------------------------------------------
-# --- 7. Fonctions d'Authentification (Firestore) ---
-# -------------------------------------------------------------------
-
-def get_user_by_username(username):
-    """ Récupère les données utilisateur à partir du nom d'utilisateur. """
-    if not db: return None
-    try:
-        # Recherche par nom d'utilisateur
-        query = db.collection(COL_USERS).where('username', '==', username).limit(1).stream()
-        for doc in query:
-            user_data = doc.to_dict()
-            user_data['id'] = doc.id
-            return user_data
-        return None
-    except Exception as e:
-        #st.error(f"Erreur de recherche utilisateur: {e}")
-        return None
-
-def handle_login(username, password):
-    """ Logique de connexion et vérification des rôles (Firestore Implémentation). """
+    # st.sidebar.radio crée une variable, pas une fonction. C'est le contexte du NameError.
+    selected_tab_name = st.sidebar.radio("Navigation", list(tab_options.keys()))
     
-    user_info = get_user_by_username(username)
-    
-    if user_info:
-        stored_hashed_password = user_info.get('password')
-        
-        # Vérification du mot de passe
-        is_default_password = (password == DEFAULT_PASSWORD)
-        
-        password_is_valid = False
-        if is_default_password:
-             password_is_valid = True # Le mot de passe par défaut est toujours accepté
-        elif stored_hashed_password:
-             try:
-                 password_is_valid = bcrypt.checkpw(password.encode('utf-8'), stored_hashed_password.encode('utf-8'))
-             except Exception:
-                  password_is_valid = False # Échoue si le hash n'est pas bon ou manquant
+    # Stocker l'ID de la fonction dans l'état de session
+    st.session_state['admin_tab_id'] = tab_options[selected_tab_name]
 
-        if password_is_valid:
-            # Si c'est le mot de passe par défaut, forcer le changement
-            must_change = is_default_password and stored_hashed_password # Seulement si un hash existe déjà, sinon on assume que l'utilisateur a créé son propre mdp
-            
-            st.session_state['logged_in'] = True
-            st.session_state['user_id'] = user_info['id']
-            st.session_state['house_id'] = user_info['house_id']
-            st.session_state['role'] = user_info['role']
-            st.session_state['user_data'] = {'first_name': user_info.get('first_name'), 'last_name': user_info.get('last_name')}
-            st.session_state['must_change_password'] = must_change
-            st.rerun()
-        else:
-            st.error("Mot de passe incorrect.")
+    # Redirection vers la fonction appropriée
+    if st.session_state['admin_tab_id'] == "admin_user_management":
+        admin_user_management()
+    elif st.session_state['admin_tab_id'] == "admin_house_category_management":
+        admin_house_category_management()
+    elif st.session_state['admin_tab_id'] == "admin_transaction_management":
+        admin_transaction_management()
+    elif st.session_state['admin_tab_id'] == "advance_validation_interface":
+        advance_validation_interface()
+    elif st.session_state['admin_tab_id'] == "admin_home":
+        st.header("Tableau de bord Général Admin/Chef de Maison")
+        st.info("Vue d'ensemble et statistiques à venir ici.")
+        # Affichage des soldes des maisons (simplifié)
+        st.subheader("Soldes des Maisons")
+        # Logique pour calculer et afficher les soldes (à développer)
+        st.write("Le calcul des soldes des Maisons sera affiché ici.")
     else:
-        st.error("Nom d'utilisateur inconnu.")
-        
-def password_reset_interface(user_id):
-    """ Interface de réinitialisation du mot de passe (Firestore Implémentation) """
-    st.title("Réinitialisation du Mot de Passe")
-    st.warning("Vous devez changer votre mot de passe par défaut pour des raisons de sécurité.")
-    
-    with st.form("reset_password_form"):
-        new_password = st.text_input("Nouveau Mot de Passe", type="password")
-        confirm_password = st.text_input("Confirmer le Mot de Passe", type="password")
-        
-        if st.form_submit_button("Changer le Mot de Passe", type="primary"):
-            if new_password == confirm_password and len(new_password) >= 6:
-                try:
-                    # Chiffrement du nouveau mot de passe
-                    hashed_password = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                    
-                    # Mise à jour Firestore
-                    db.collection(COL_USERS).document(user_id).update({'password': hashed_password})
-                    
-                    st.session_state['must_change_password'] = False
-                    st.success("Mot de passe changé avec succès ! Vous pouvez continuer.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erreur lors de la mise à jour du mot de passe: {e}")
-            else:
-                st.error("Les mots de passe ne correspondent pas ou sont trop courts (min 6 caractères).")
+        st.error("Interface non trouvée.")
 
-def login_interface():
-    """ Interface de connexion """
-    st.title("Connexion à l'application SMMD Compta")
-    
-    with st.form("login_form"):
-        username = st.text_input("Nom d'utilisateur")
-        password = st.text_input("Mot de passe", type="password")
-        submitted = st.form_submit_button("Se Connecter", type="primary")
-
-        if submitted:
-            handle_login(username, password)
-            
-    st.caption("Note: Assurez-vous d'avoir des utilisateurs dans la collection `smmd_users` de Firestore. Le mot de passe par défaut est `first123`.")
 
 # -------------------------------------------------------------------
-# --- 8. Lancement de l'Application ---
+# --- UTILS DE DONNÉES (pour affichage) ---
+# -------------------------------------------------------------------
+
+def get_all_transactions():
+    """Récupère toutes les transactions de la DB."""
+    if not db:
+        return []
+    try:
+        docs = db.collection(COL_TRANSACTIONS).stream()
+        return [{"id": doc.id, **doc.to_dict()} for doc in docs]
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des transactions: {e}")
+        return []
+
+def get_house_transactions(house_id):
+    """Récupère les transactions pour une Maison donnée."""
+    if not db or not house_id:
+        return []
+    try:
+        query = db.collection(COL_TRANSACTIONS).where('house_id', '==', house_id).stream()
+        return [{"id": doc.id, **doc.to_dict()} for doc in query]
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des transactions de la Maison: {e}")
+        return []
+
+def format_transaction_df(df, detailed=False):
+    """Formate le DataFrame des transactions pour l'affichage."""
+    if df.empty:
+        return df
+
+    # Renommage des colonnes
+    df = df.rename(columns={
+        'id': 'ID',
+        'type': 'Type (Clé)',
+        'amount': 'Montant (€)',
+        'description': 'Description',
+        'date': 'Date',
+        'method': 'Méthode',
+        'house_id': 'Maison (Clé)',
+        'user_id': 'Utilisateur (Clé)',
+        'category_id': 'Catégorie (Clé)',
+        'is_validated': 'Validée'
+    })
+    
+    # Ajout des noms lisibles
+    df['Type'] = df['Type (Clé)'].map(TX_TYPE_MAP)
+    df['Maison'] = df['Maison (Clé)'].apply(get_house_name)
+    
+    # Pour la lisibilité, on met les noms en premier
+    columns_order = ['ID', 'Date', 'Montant (€)', 'Description', 'Type', 'Maison', 'Méthode']
+    
+    if detailed:
+        # Ajout des informations détaillées pour l'admin
+        # Logique pour récupérer les noms d'utilisateur et de catégorie complets (omise pour la simplicité)
+        columns_order.extend(['Utilisateur (Clé)', 'Catégorie (Clé)', 'Validée'])
+
+    # Supprimer les colonnes clés redondantes si on a les noms lisibles, sauf si en mode détaillé
+    cols_to_drop = [col for col in ['Type (Clé)', 'Maison (Clé)'] if col in df.columns]
+    df = df.drop(columns=cols_to_drop, errors='ignore')
+    
+    # Tenter de trier par date
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.sort_values(by='Date', ascending=False)
+        df['Date'] = df['Date'].dt.strftime('%Y-%m-%d') # Reformatage pour l'affichage
+
+    # S'assurer que 'Montant (€)' est formaté
+    df['Montant (€)'] = df['Montant (€)'].round(2)
+    
+    return df[columns_order]
+
+def df_to_excel_bytes(df):
+    """Convertit un DataFrame en un fichier Excel en mémoire (bytes)."""
+    output = io.BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    
+    # Écrire les en-têtes (noms des colonnes)
+    ws.append(list(df.columns))
+    
+    # Écrire les lignes du DataFrame
+    for r_idx, r in enumerate(dataframe_to_rows(df, header=False, index=False)):
+        # Commencer à la deuxième ligne car la première est l'en-tête
+        for c_idx, value in enumerate(r):
+            ws.cell(row=r_idx + 2, column=c_idx + 1, value=value)
+
+    wb.save(output)
+    return output.getvalue()
+
+
+# -------------------------------------------------------------------
+# --- Fonction Principale ---
 # -------------------------------------------------------------------
 
 def main():
-    # Initialisation des variables de session
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-        st.session_state['user_id'] = None
-        st.session_state['role'] = None
-
-    if not st.session_state.get('initialized'):
-        # Le code d'initialisation en haut du fichier gère les erreurs et affiche un message.
-        return
-
-    if not st.session_state['logged_in']:
-        login_interface()
+    """Fonction principale de l'application Streamlit."""
     
+    st.title("Comptabilité SMMD Alsace")
+
+    # Vérification de l'authentification (si l'utilisateur n'est pas connecté)
+    if not st.session_state.get('authenticated', False):
+        # --- Interface de Connexion ---
+        st.header("Connexion")
+        
+        col_login, col_create = st.columns(2)
+
+        with col_login.form("login_form"):
+            st.subheader("Accès Utilisateur")
+            email_id = st.text_input("Identifiant (Ex: prenom.nom)", placeholder="Ex: jean.dupont")
+            password = st.text_input("Mot de Passe", type="password")
+            login_submitted = st.form_submit_button("Se connecter", type="primary")
+
+            if login_submitted:
+                if not db:
+                    st.error("Base de données non initialisée.")
+                    return
+
+                try:
+                    # L'ID du document est l'email_id
+                    user_doc = db.collection(COL_USERS).document(email_id).get()
+                    
+                    if user_doc.exists:
+                        user_data = user_doc.to_dict()
+                        if check_password(password, user_data.get('password', '')):
+                            st.session_state['authenticated'] = True
+                            st.session_state['user_id'] = email_id
+                            st.session_state['user_data'] = user_data
+                            st.session_state['role'] = user_data.get('role', 'utilisateur')
+                            st.session_state['house_id'] = user_data.get('house_id')
+                            st.session_state['must_change_password'] = user_data.get('must_change_password', False)
+                            st.success(f"Bienvenue, {user_data.get('first_name')}!")
+                            st.rerun() # Recharger l'application pour afficher le contenu
+                        else:
+                            st.error("Mot de passe incorrect.")
+                    else:
+                        st.error("Nom d'utilisateur inconnu.")
+                except Exception as e:
+                    st.error(f"Erreur de connexion : {e}")
+        
+        # Le panneau de création n'est pas destiné à être utilisé en production sans vérification admin
+        with col_create:
+            st.subheader("Création de Compte (Admin)")
+            st.warning("La création de compte est gérée dans l'interface d'administration.")
+            st.caption(f"Note: Le mot de passe par défaut pour les nouveaux utilisateurs est : `{DEFAULT_PASSWORD}`")
+
+
     else:
-        # Sidebar pour les utilisateurs connectés
+        # --- Interface Connectée ---
+        
+        # Bouton de déconnexion
         if st.sidebar.button("Déconnexion", type="secondary"):
             st.session_state.clear()
             st.rerun()
 
+        # Informations utilisateur dans la barre latérale
         st.sidebar.markdown(f"""
             **Connecté en tant que :** {st.session_state['user_data'].get('first_name')} 
             **Rôle :** {st.session_state['role'].capitalize()} 
@@ -863,6 +715,7 @@ def main():
         """)
         st.sidebar.markdown("---")
 
+        # Vérification du changement de mot de passe forcé
         if st.session_state.get('must_change_password', False):
             # L'utilisateur doit changer son mot de passe
             password_reset_interface(st.session_state['user_id'])
@@ -870,14 +723,17 @@ def main():
         else:
             # Redirection vers le tableau de bord ou l'interface d'administration
             user_role = st.session_state['role']
+            
             # L'admin général et le chef de maison utilisent la même fonction admin_interface pour le menu latéral
             if user_role in ['admin', 'chef_de_maison']:
-                # L'admin_interface gère les sous-menus Chef de Maison
                 admin_interface() 
             else: 
                 user_dashboard() # Rôle 'utilisateur'
                 
 
+# -------------------------------------------------------------------
+# --- Lancement de l'Application ---\r\n
+# -------------------------------------------------------------------
 if __name__ == '__main__':
-    st.set_page_config(page_title="SM MMD Compta", layout="wide")
+    st.set_page_config(page_title="Comptabilité SMMD Alsace", layout="wide")
     main()
