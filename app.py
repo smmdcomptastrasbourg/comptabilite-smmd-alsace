@@ -193,7 +193,7 @@ def get_user_info(user_id):
 # -------------------------------------------------------------------
 # --- INTERFACES UTILISATEUR & ADMINISTRATEUR (Définitions) ---
 # -------------------------------------------------------------------
-
+ 
 def password_reset_interface(user_id):
     """Interface de réinitialisation de mot de passe forcée."""
     st.header("Réinitialisation du Mot de Passe")
