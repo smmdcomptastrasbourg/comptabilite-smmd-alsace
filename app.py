@@ -1,78 +1,70 @@
 import streamlit as st
 import os
 import json
-from firebase_admin import initialize_app, credentials, firestore, exceptions
+# J'ajoute 'app' ici au cas où l'import local échouerait toujours.
+from firebase_admin import initialize_app, credentials, firestore, exceptions, app 
 from datetime import datetime, date, timedelta
 import pandas as pd
 import bcrypt
 from functools import lru_cache 
 import io 
 
-# -------------------------------------------------------------------
-# --- 1. Initialisation Firebase ---
-# -------------------------------------------------------------------
+# --- CONSTANTES ---
+# NOTE: Vous devez avoir ici vos constantes (COL_USERS, ROLES, DEFAULT_PASSWORD, etc.)
+COL_USERS = "smmd_users" # Exemple de constante
+ROLES = ["admin", "superviseur", "utilisateur"] # Exemple de constante
 
-# ATTENTION SÉCURITÉ GIT : 
-# L'objet FIREBASE_SERVICE_ACCOUNT_INFO a été retiré pour des raisons de sécurité Git.
-# Il est désormais chargé à partir d'une variable d'environnement.
-# VOUS DEVEZ DÉFINIR LA VARIABLE D'ENVIRONNEMENT 'FIREBASE_SERVICE_ACCOUNT' 
-# (contenant le JSON complet de la clé de service) DANS VOTRE ENVIRONNEMENT STREAMLIT.
-# Exemple dans un terminal : export FIREBASE_SERVICE_ACCOUNT='{"type": "service_account", ...}'
-# Ou dans .streamlit/secrets.toml pour Streamlit Cloud.
-try:
-    # 1. Tenter de charger les informations de la clé de service depuis l'environnement
-    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+# --- FONCTION D'INITIALISATION FIREBASE ---
+
+@st.cache_resource
+def initialize_firebase():
+    """Initialise Firebase en utilisant la variable d'environnement et retourne l'instance de l'application."""
     
-    if service_account_json:
-        FIREBASE_SERVICE_ACCOUNT_INFO = json.loads(service_account_json)
-    else:
-        # Fallback pour les tests locaux (si la variable d'env n'est pas définie)
-        # Mais cela devrait ÉCHOUER si vous n'avez pas de clé ici.
+    # 1. Gestion de la variable d'environnement manquante
+    if 'FIREBASE_SERVICE_ACCOUNT' not in os.environ:
         st.error("ERREUR DE CONFIGURATION: Variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' non définie.")
-        st.session_state['initialized'] = False
         st.stop()
         
-    
-    # 2. Initialisation
-    if not st.session_state.get('db'):
-        cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_INFO)
+    # 2. Chargement des credentials (compte de service)
+    try:
+        cred_json = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
+        cred = credentials.Certificate(cred_json)
+    except Exception as e:
+        st.error(f"Erreur lors du chargement du JSON de service Firebase: {e}")
+        st.stop()
         
-        try:
-            # Tente d'initialiser ou de récupérer l'instance par défaut si elle existe
-            from firebase_admin import get_apps
-            if not get_apps():
-                app = initialize_app(cred, name="smmd_app") 
-            else:
-                 # Si l'application a déjà été initialisée, on récupère l'instance existante (si elle a le bon nom)
-                 from firebase_admin import get_app
-                 try:
-                     app = get_app("smmd_app")
-                 except ValueError:
-                     # Si l'app existe mais sans le nom 'smmd_app', on l'initialise avec le nom.
-                     app = initialize_app(cred, name="smmd_app")
+    # 3. Initialisation sécurisée
+    try:
+        # Tente l'initialisation. Si l'application existe déjà, ValueError est levée.
+        app_instance = initialize_app(cred)
+    except ValueError:
+        # L'application par défaut existe déjà (à cause de Streamlit), nous la récupérons.
+        # Utilisation de l'import 'app as fb_app' déjà présent dans les imports globaux si possible, ou comme ci-dessous:
+        from firebase_admin import app as fb_app 
+        app_instance = fb_app.get_app()
+        
+    # 4. Utilisation de l'instance pour initialiser le client Firestore
+    db = firestore.client(app=app_instance)
+        
+    return app_instance, db # Retourne l'instance de l'application et du client db
 
-            st.session_state['db'] = firestore.client(app=app)
-            st.session_state['initialized'] = True
-        except exceptions.FirebaseError as fe:
-            st.error(f"Erreur d'initialisation Firebase : {fe}")
-            st.session_state['initialized'] = False
-            st.stop()
-        except Exception as e:
-            st.error(f"Erreur inattendue lors de l'initialisation Firebase : {e}")
-            st.session_state['initialized'] = False
-            st.stop()
+# --- APPEL GLOBAL POUR DÉFINIR 'db' ET 'firebase_app' (CORRECTION CLÉ) ---
 
-except json.JSONDecodeError:
-    st.error("Erreur: La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' n'est pas un JSON valide.")
-    st.session_state['initialized'] = False
-    st.stop()
+try:
+    # La variable 'db' est maintenant définie au niveau global du script.
+    firebase_app, db = initialize_firebase()
 except Exception as e:
-    st.error(f"Erreur critique lors du chargement de la configuration : {e}")
-    st.session_state['initialized'] = False
+    st.error(f"Échec de l'initialisation de l'application : {e}")
     st.stop()
+    
+# NOTE: Le reste de vos fonctions (hash_password, check_password, get_all_houses,
+# get_house_name, etc., ainsi que main()) doit suivre ici.
+# Elles peuvent maintenant toutes utiliser la variable 'db' sans NameError.
 
-
-db = st.session_state.get('db')
+# Exemple de fonction qui peut maintenant utiliser 'db' :
+# def get_all_houses():
+#     docs = db.collection('smmd_houses').stream()
+#     return [{"id": doc.id, **doc.to_dict()} for doc in docs]
 
 # -------------------------------------------------------------------
 # --- 2. Constantes globales ---
