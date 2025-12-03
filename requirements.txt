@@ -4,3 +4,4 @@ firebase-admin
 pytz 
 gunicorn 
 bcrypt
+openpyxl
