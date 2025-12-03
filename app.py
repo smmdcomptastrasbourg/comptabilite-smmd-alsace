@@ -12,39 +12,65 @@ import io
 # --- 1. Initialisation Firebase ---
 # -------------------------------------------------------------------
 
-# Contenu de la clé de service fournie
-FIREBASE_SERVICE_ACCOUNT_INFO = {
-  "type": "service_account",
-  "project_id": "comptabilite-smmd-alsace",
-  "private_key_id": "7d020a95fb037e7ed2909e5a1310116a1d73c2b0",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDEyK4IcLHkI2sg\nnTNuETgitJ75QUumpQyI3xcg9jkAfmeUrCnKcJkxQfTI3GfhCP40mzSLe17mEbEo\n61zqNRhjxq5emVvxd47WKrM/40MTUOyv/Ptk2hLvBv3hMy4nEIARAjT5TgY1IHF+\nuVhc6qPq3EUnSGfEn/dJN1iJ0A+Ea/AlUoqM9jU2jz8AmI/fkuF7iXuKdHeg4EvK\nRjhpEx5T2Yl8bgiUCioqmxvY/rkh8bnmEFNutl5lbfX0Fe43jakb41JiR4GbltJE\nVwYE6w3yPs7mIvY1X/52wQ2qtqy0mdgW8/pObRQPb7G2jPrkigoD29VeJ8cnWvCg\nRBFPgqqjAgMBAAECggEAPapJZxmxlTVIJ8M7T2TwsRpIODGTSVhhS6rt8eQ20fB\nO8Srn+WjC92IUL1IzCseRevxDliNx3j51EHVLwuOZg3nrHtQZZ26pABjhXy5Ez+D\nvC6BtPvlfQPq4PxB1ToFd88CPLGnnlRZXIXGW++niDyYaxP0eJhMTKRMWXtasXr4\naypHArGiIJ7NmYLEWcDzSCjoHbI0HwtSXX06Ruq9m8IN5H4a2A7l21uXEWYUd41I\n33pF5eosbzc5kZ5Hf7x4WI1RXaP53EAVBd0TMF27CElhoZB7Lr6hIVuG+Fr2Bbhm\nMUHfwnY9bg9f7Lxf0Lc2Y2CpT+fqUkcFAhgD8dj5GQKBgQD0YcvwP/vKCbrSmFIg\nUDIepGJCOnefIL/ep/Uj7LxDNkrDiKssvZUYesKnfKyUEv3QD8D1+ESkCJLqaw8F\nGG8oLfdkE4ul82j5DVzvjgZbXI83cTUl3UW1slyY75JKNmMKZpdBeHarZnfKatQy\n65CQaQk695HPqcPDEIB/rfsFZQKBgQDOI5mF26K3CSra67rNF96MTaiV3B5hMSPZ\noi3uRxmIU7+kQGw+31+K5Xc4RypYPtwsl4ILWfKaeLu48S0wrBb2Cmi1qmyigC27\nn29ZJfg2msQ/ZwqMsf2wvY2f8x/q3hEoyibvGwC03Onq6MscWV5OOwnkAFR/AtDD\nnhYWtlkTZwKBgEHj1F60gajZsrtxQkNgHANTAwMkTHhlFhZsZpYHEEN28fWCddSc\nUQTGpJEP9l/+NtzQQpCPHcK0ZRg7QVN4YRAORLOA6ZgW5uivh603N9OOQzcJmPDZ\ngggZTQoXHfRQcaeuPX3zgtt3xziWURxhkxq8lzaE5ZV+CkAfxOWn/RRZAoGAVWdK\nY7rrXwndR3YCnpYVDevevLfHnl7Ni401mlK6sVCBRXurXSEOZG1NR3O0h3sDnTXo\nGuvZJ0Z9/9Fr945UtPr7Bsjk2S5hxCn55+VjQLw+MkZuiHv1rxPZaTtBLf1y/oNC\nPi3jqlMcVsa737Lm72JmZp/8YeK4u1Lzs9U4cmECgYBEHxbHOHNSO+MaQfjg8A5l\n5HSkadokwtS8ozmCUkUYvEIE6hdoe94IPLlT+QWteuK4dEPK3aKrh/3Kjr+gtcIv\npBu30CpijJ8zOxSO3aOrmxd458hqjPlIgogsdT2dBm8e8nQna/fhUjE1haS7QJ9d\nVK8Qj3qIWuaslCehZBx+ow==\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-fbsvc@comptabilite-smmd-alsace.iam.gserviceaccount.com",
-  "client_id": "115806314901782369838",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40comptabilite-smmd-alsace.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-}
-
-# Initialisation
-if not st.session_state.get('db'):
-    try:
+# ATTENTION SÉCURITÉ GIT : 
+# L'objet FIREBASE_SERVICE_ACCOUNT_INFO a été retiré pour des raisons de sécurité Git.
+# Il est désormais chargé à partir d'une variable d'environnement.
+# VOUS DEVEZ DÉFINIR LA VARIABLE D'ENVIRONNEMENT 'FIREBASE_SERVICE_ACCOUNT' 
+# (contenant le JSON complet de la clé de service) DANS VOTRE ENVIRONNEMENT STREAMLIT.
+# Exemple dans un terminal : export FIREBASE_SERVICE_ACCOUNT='{"type": "service_account", ...}'
+# Ou dans .streamlit/secrets.toml pour Streamlit Cloud.
+try:
+    # 1. Tenter de charger les informations de la clé de service depuis l'environnement
+    service_account_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+    
+    if service_account_json:
+        FIREBASE_SERVICE_ACCOUNT_INFO = json.loads(service_account_json)
+    else:
+        # Fallback pour les tests locaux (si la variable d'env n'est pas définie)
+        # Mais cela devrait ÉCHOUER si vous n'avez pas de clé ici.
+        st.error("ERREUR DE CONFIGURATION: Variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' non définie.")
+        st.session_state['initialized'] = False
+        st.stop()
+        
+    
+    # 2. Initialisation
+    if not st.session_state.get('db'):
         cred = credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_INFO)
-        # Assurez-vous que l'application n'est initialisée qu'une seule fois
+        
         try:
             # Tente d'initialiser ou de récupérer l'instance par défaut si elle existe
-            app = initialize_app(cred, name="smmd_app") 
-        except ValueError:
-             # Si l'application a déjà été initialisée, on récupère l'instance existante
-             from firebase_admin import get_app
-             app = get_app("smmd_app")
-             
-        st.session_state['db'] = firestore.client(app=app)
-        st.session_state['initialized'] = True
-    except Exception as e:
-        # st.error(f"Erreur d'initialisation Firebase : {e}")
-        st.session_state['initialized'] = False
+            from firebase_admin import get_apps
+            if not get_apps():
+                app = initialize_app(cred, name="smmd_app") 
+            else:
+                 # Si l'application a déjà été initialisée, on récupère l'instance existante (si elle a le bon nom)
+                 from firebase_admin import get_app
+                 try:
+                     app = get_app("smmd_app")
+                 except ValueError:
+                     # Si l'app existe mais sans le nom 'smmd_app', on l'initialise avec le nom.
+                     app = initialize_app(cred, name="smmd_app")
+
+            st.session_state['db'] = firestore.client(app=app)
+            st.session_state['initialized'] = True
+        except exceptions.FirebaseError as fe:
+            st.error(f"Erreur d'initialisation Firebase : {fe}")
+            st.session_state['initialized'] = False
+            st.stop()
+        except Exception as e:
+            st.error(f"Erreur inattendue lors de l'initialisation Firebase : {e}")
+            st.session_state['initialized'] = False
+            st.stop()
+
+except json.JSONDecodeError:
+    st.error("Erreur: La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' n'est pas un JSON valide.")
+    st.session_state['initialized'] = False
+    st.stop()
+except Exception as e:
+    st.error(f"Erreur critique lors du chargement de la configuration : {e}")
+    st.session_state['initialized'] = False
+    st.stop()
+
 
 db = st.session_state.get('db')
 
@@ -662,6 +688,7 @@ def admin_interface():
             advance_validation_interface(house_id, user_id) 
         
         elif admin_tab == 'Gestion des Transactions':
+            # Nouvelle fonction pour gérer et annuler toutes les transactions de la maison
             admin_transaction_management(house_id, user_id, role)
 
         elif admin_tab == 'Rapports et Analyse':
@@ -817,11 +844,7 @@ def main():
         st.session_state['role'] = None
 
     if not st.session_state.get('initialized'):
-        # On affiche un message si l'initialisation a échoué pour une raison quelconque
-        if 'db' not in st.session_state:
-            st.error("L'application n'a pas pu s'initialiser. Veuillez vérifier la clé de service Firebase.")
-        else:
-             st.warning("Veuillez patienter pendant l'initialisation de Firebase...")
+        # Le code d'initialisation en haut du fichier gère les erreurs et affiche un message.
         return
 
     if not st.session_state['logged_in']:
@@ -849,7 +872,8 @@ def main():
             user_role = st.session_state['role']
             # L'admin général et le chef de maison utilisent la même fonction admin_interface pour le menu latéral
             if user_role in ['admin', 'chef_de_maison']:
-                admin_interface()
+                # L'admin_interface gère les sous-menus Chef de Maison
+                admin_interface() 
             else: 
                 user_dashboard() # Rôle 'utilisateur'
                 
