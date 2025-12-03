@@ -1,8 +1,7 @@
 import streamlit as st
 import os
 import json
-# J'ajoute 'app' ici au cas où l'import local échouerait toujours.
-from firebase_admin import initialize_app, credentials, firestore, exceptions, app 
+from firebase_admin import initialize_app, credentials, firestore, exceptions
 from datetime import datetime, date, timedelta
 import pandas as pd
 import bcrypt
