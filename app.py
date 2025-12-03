@@ -38,32 +38,26 @@ def initialize_firebase():
         app_instance = initialize_app(cred)
     except ValueError:
         # L'application par défaut existe déjà (à cause de Streamlit), nous la récupérons.
-        # Utilisation de l'import 'app as fb_app' déjà présent dans les imports globaux si possible, ou comme ci-dessous:
-        from firebase_admin import app as fb_app 
-        app_instance = fb_app.get_app()
+        
+        # 🚨 CORRECTION FINALE ET ROBUSTE : Gestion des différentes versions de firebase-admin SDK
+        try:
+            # Tente la méthode moderne (pour SDK >= 4.0)
+            from firebase_admin.app import get_app 
+        except ImportError:
+            # Si l'importation moderne échoue, tente la méthode plus ancienne (pour SDK < 4.0)
+            try:
+                from firebase_admin import get_app
+            except ImportError as e:
+                # Si même l'ancienne méthode échoue, cela signifie une installation corrompue ou très ancienne.
+                st.error(f"Erreur fatale : Impossible de trouver 'get_app' dans Firebase Admin. Veuillez vérifier la version installée de 'firebase-admin' dans requirements.txt.")
+                st.stop()
+        
+        app_instance = get_app()
         
     # 4. Utilisation de l'instance pour initialiser le client Firestore
     db = firestore.client(app=app_instance)
         
     return app_instance, db # Retourne l'instance de l'application et du client db
-
-# --- APPEL GLOBAL POUR DÉFINIR 'db' ET 'firebase_app' (CORRECTION CLÉ) ---
-
-try:
-    # La variable 'db' est maintenant définie au niveau global du script.
-    firebase_app, db = initialize_firebase()
-except Exception as e:
-    st.error(f"Échec de l'initialisation de l'application : {e}")
-    st.stop()
-    
-# NOTE: Le reste de vos fonctions (hash_password, check_password, get_all_houses,
-# get_house_name, etc., ainsi que main()) doit suivre ici.
-# Elles peuvent maintenant toutes utiliser la variable 'db' sans NameError.
-
-# Exemple de fonction qui peut maintenant utiliser 'db' :
-# def get_all_houses():
-#     docs = db.collection('smmd_houses').stream()
-#     return [{"id": doc.id, **doc.to_dict()} for doc in docs]
 
 # -------------------------------------------------------------------
 # --- 2. Constantes globales ---
