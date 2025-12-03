@@ -6,7 +6,7 @@ from datetime import datetime, date, timedelta
 import pandas as pd
 import bcrypt
 from functools import lru_cache 
-import io # Ajout pour l'export Excel
+import io 
 
 # -------------------------------------------------------------------
 # --- 1. Initialisation Firebase ---
@@ -17,7 +17,7 @@ FIREBASE_SERVICE_ACCOUNT_INFO = {
   "type": "service_account",
   "project_id": "comptabilite-smmd-alsace",
   "private_key_id": "7d020a95fb037e7ed2909e5a1310116a1d73c2b0",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDEyK4IcLHkI2sg\nnTNuETgitJ75QUumpQyI3xcg9jkAfmeUrCnKcJkxQfTI3GfhCP40mzSLe17mEbEo\n61zqNRhjxq5emVvxd47WKrM/40MTUOyv/Ptk2hLvBv3hMy4nEIARAjT5TgY1IHF+\nuVhc6qPq3EUnSGfEn/dJN1iJ0A+Ea/AlUoqM9jU2jz8AmI/fkuF7iXuKdHeg4EvK\nRjhpEx5T2Yl8bgiUCioqmxvY/rkh8bnmEFNutl5lbfX0Fe43jakb41JiR4GbltJE\nVwYE6w3yPs7mIvY1X/52wQ2qtqy0mdgW8/pObRQPb7G2jPrkigoD29VeJ8cnWvCg\nRBFPgqqjAgMBAAECggEAPapJZxmxlTVIJ8M7T2TwsRpIODGTSVhhS6rt8eQ20fB\nO8Srn+WjC92IUL1IzCseRevxDliNx3j51EHVLwuOZg3nrHtQZZ26pABjhXy5Ez+D\nvC6BtPvlfQPq4PxB1ToFd88CPLGnnlRZXIXGW++niDyYaxP0eJhMTKRMWXtasXr4\naypHArGiIJ7NmYLEWcDzSCjoHbI0HwtSXX06Ruq9m8IN5H4a2A7l21uXEWYUd41I\n33pF5eosbzc5kZ5Hf7x4WI1RXaP53EAVBd0TMF27CElhoZB7Lr6hIVuG+Fr2Bbhm\nMUHfwnY9bg9f7Lxf0Lc2Y2CpT+fqUkcFAhgD8dj5GQKBgQD0YcvwP/vKCbrSmFIg\nUDIepGJCOnefIL/ep/Uj7LxDNkrDiKssvZUYesKnfKyUEv3QD8D1+ESkCJLqaw8F\nGG8oLfdkE4ul82j5DVzvjgZbXI83cTUl3UW1slyY75JKNmMKZpdBeHarZnfKatQy\n65CQaQk695HPqcPDEIB/rfsFZQKBgQDOI5mF26K3CSra67rNF96MTaiV3B5hMSPZ\noi3uRxmIU7+kQGw+31+K5Xc4RypYPtwsl4ILWfKaeLu48S0wrBb2Cmi1qmyigC27\nn29ZJfg2msQ/ZwqMsf2wvY2f8x/q3hEoyibvGwU03Onq6MscWV5OOwnkAFR/AtDD\nnhYWtlkTZwKBgEHj1F60gajZsrtxQkNgHANTAwMkTHhlFhZsZpYHEEN28fWCddSc\nUQTGpJEP9l/+NtzQQpCPHcK0ZRg7QVN4YRAORLOA6ZgW5uivh603N9OOQzcJmPDZ\ngggZTQoXHfRQcaeuPX3zgtt3xziWURxhkxq8lzaE5ZV+CkAfxOWn/RRZAoGAVWdK\nY7rrXwndR3YCnpYVDevevLfHnl7Ni401mlK6sVCBRXurXSEOZG1NR3O0h3sDnTXo\nGuvZJ0Z9/9Fr945UtPr7Bsjk2S5hxCn55+VjQLw+MkZuiHv1rxPZaTtBLf1y/oNC\nPi3jqlMcVsa737Lm72JmZp/8YeK4u1Lzs9U4cmECgYBEHxbGOHNSO+MaQfjg8A5l\n5HSkadokwtS8ozmCUkUYvEIE6hdoe94IPLlT+QWteuK4dEPK3aKrh/3Kjr+gtcIv\npBu30CpijJ8zOxSO3aOrmxd458hqjPlIgogsdT2dBm8e8nQna/fhUjE1haS7QJ9d\nVK8Qj3qIWuaslCehZBx+ow==\n-----END PRIVATE KEY-----\n",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDEyK4IcLHkI2sg\nnTNuETgitJ75QUumpQyI3xcg9jkAfmeUrCnKcJkxQfTI3GfhCP40mzSLe17mEbEo\n61zqNRhjxq5emVvxd47WKrM/40MTUOyv/Ptk2hLvBv3hMy4nEIARAjT5TgY1IHF+\nuVhc6qPq3EUnSGfEn/dJN1iJ0A+Ea/AlUoqM9jU2jz8AmI/fkuF7iXuKdHeg4EvK\nRjhpEx5T2Yl8bgiUCioqmxvY/rkh8bnmEFNutl5lbfX0Fe43jakb41JiR4GbltJE\nVwYE6w3yPs7mIvY1X/52wQ2qtqy0mdgW8/pObRQPb7G2jPrkigoD29VeJ8cnWvCg\nRBFPgqqjAgMBAAECggEAPapJZxmxlTVIJ8M7T2TwsRpIODGTSVhhS6rt8eQ20fB\nO8Srn+WjC92IUL1IzCseRevxDliNx3j51EHVLwuOZg3nrHtQZZ26pABjhXy5Ez+D\nvC6BtPvlfQPq4PxB1ToFd88CPLGnnlRZXIXGW++niDyYaxP0eJhMTKRMWXtasXr4\naypHArGiIJ7NmYLEWcDzSCjoHbI0HwtSXX06Ruq9m8IN5H4a2A7l21uXEWYUd41I\n33pF5eosbzc5kZ5Hf7x4WI1RXaP53EAVBd0TMF27CElhoZB7Lr6hIVuG+Fr2Bbhm\nMUHfwnY9bg9f7Lxf0Lc2Y2CpT+fqUkcFAhgD8dj5GQKBgQD0YcvwP/vKCbrSmFIg\nUDIepGJCOnefIL/ep/Uj7LxDNkrDiKssvZUYesKnfKyUEv3QD8D1+ESkCJLqaw8F\nGG8oLfdkE4ul82j5DVzvjgZbXI83cTUl3UW1slyY75JKNmMKZpdBeHarZnfKatQy\n65CQaQk695HPqcPDEIB/rfsFZQKBgQDOI5mF26K3CSra67rNF96MTaiV3B5hMSPZ\noi3uRxmIU7+kQGw+31+K5Xc4RypYPtwsl4ILWfKaeLu48S0wrBb2Cmi1qmyigC27\nn29ZJfg2msQ/ZwqMsf2wvY2f8x/q3hEoyibvGwC03Onq6MscWV5OOwnkAFR/AtDD\nnhYWtlkTZwKBgEHj1F60gajZsrtxQkNgHANTAwMkTHhlFhZsZpYHEEN28fWCddSc\nUQTGpJEP9l/+NtzQQpCPHcK0ZRg7QVN4YRAORLOA6ZgW5uivh603N9OOQzcJmPDZ\ngggZTQoXHfRQcaeuPX3zgtt3xziWURxhkxq8lzaE5ZV+CkAfxOWn/RRZAoGAVWdK\nY7rrXwndR3YCnpYVDevevLfHnl7Ni401mlK6sVCBRXurXSEOZG1NR3O0h3sDnTXo\nGuvZJ0Z9/9Fr945UtPr7Bsjk2S5hxCn55+VjQLw+MkZuiHv1rxPZaTtBLf1y/oNC\nPi3jqlMcVsa737Lm72JmZp/8YeK4u1Lzs9U4cmECgYBEHxbHOHNSO+MaQfjg8A5l\n5HSkadokwtS8ozmCUkUYvEIE6hdoe94IPLlT+QWteuK4dEPK3aKrh/3Kjr+gtcIv\npBu30CpijJ8zOxSO3aOrmxd458hqjPlIgogsdT2dBm8e8nQna/fhUjE1haS7QJ9d\nVK8Qj3qIWuaslCehZBx+ow==\n-----END PRIVATE KEY-----\n",
   "client_email": "firebase-adminsdk-fbsvc@comptabilite-smmd-alsace.iam.gserviceaccount.com",
   "client_id": "115806314901782369838",
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -196,6 +196,7 @@ def delete_transaction(transaction_id, house_id, user_id, user_role):
         transaction_data = doc.to_dict()
 
         is_author = transaction_data.get('user_id') == user_id
+        # Le chef de maison et l'admin peuvent annuler n'importe quelle transaction de leur maison
         is_house_admin = user_role == 'chef_de_maison' and transaction_data.get('house_id') == house_id
         is_admin = user_role == 'admin'
 
@@ -253,13 +254,6 @@ def validate_advance(transaction_id, house_id, validator_user_id):
 def generate_excel_report(df_all: pd.DataFrame, house_name: str) -> bytes:
     """
     Génère un rapport Excel structuré et lisible à partir du DataFrame de transactions.
-    
-    Args:
-        df_all: Le DataFrame complet des transactions de la maison.
-        house_name: Nom de la maison pour le titre du rapport.
-        
-    Returns:
-        Les octets du fichier Excel.
     """
     
     if df_all.empty:
@@ -433,6 +427,69 @@ def allocation_management(user_id):
              # Simulation de l'écriture BDD
              st.success(f"Simulation: Allocation mensuelle mise à jour à {new_amount} € dans la BDD.")
 
+def user_transaction_history_and_cancellation(house_id, user_id, user_role):
+    """Affiche l'historique et permet l'annulation des transactions pour l'utilisateur."""
+    st.subheader("Historique de vos dépenses et avances")
+
+    # 1. Récupérer les transactions de l'utilisateur (Firestore)
+    user_transactions_df = get_user_transactions(house_id, user_id)
+    
+    if user_transactions_df.empty:
+        st.info("Vous n'avez pas encore saisi de transactions.")
+        return
+
+    # Préparer le DataFrame pour l'affichage
+    display_df = user_transactions_df.copy()
+    display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
+    display_df['Type'] = display_df['type'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre'))
+    display_df['Catégorie'] = display_df['category_name']
+    display_df['Statut Avance'] = display_df['statut_avance'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A'))
+    display_df['Transaction_ID'] = display_df['id']
+
+    cols_to_show = ['date', 'Type', 'Montant', 'Catégorie', 'description', 'payment_method', 'Statut Avance', 'Transaction_ID']
+    display_df = display_df[cols_to_show].rename(columns={
+        'date': 'Date', 
+        'description': 'Description', 
+        'payment_method': 'Moyen de Paiement'
+    }).sort_values('Date', ascending=False)
+    
+    st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
+
+    st.markdown("#### 🗑️ Annuler une Saisie Récente")
+    st.caption("Vous pouvez annuler toute transaction que vous avez saisie.")
+    
+    annulable_df = display_df.copy()
+
+    if not annulable_df.empty:
+        with st.form("form_annulation_transaction", clear_on_submit=True):
+            col1, col2 = st.columns([3, 1])
+            
+            # S'assurer que seules les transactions de cet utilisateur sont dans la liste
+            transaction_to_delete = col1.selectbox(
+                "Sélectionnez la transaction à annuler :",
+                options=annulable_df['Transaction_ID'].tolist(),
+                # Utiliser .dt.strftime pour formater la date si c'est un datetime
+                format_func=lambda id: f"{annulable_df[annulable_df['Transaction_ID'] == id]['Date'].iloc[0].strftime('%Y-%m-%d')} - {annulable_df[annulable_df['Transaction_ID'] == id]['Montant'].iloc[0]} ({annulable_df[annulable_df['Transaction_ID'] == id]['Description'].iloc[0][:30]}...)"
+            )
+            
+            submitted = col2.form_submit_button("Annuler la Dépense", type="secondary")
+
+            if submitted and transaction_to_delete:
+                success, message = delete_transaction(
+                    transaction_to_delete, 
+                    house_id,
+                    user_id,
+                    user_role
+                )
+
+                if success:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+    else:
+        st.info("Aucune transaction à annuler trouvée.")
+
 def user_dashboard():
     """ Tableau de bord utilisateur """
     user_id = st.session_state['user_id']
@@ -453,74 +510,76 @@ def user_dashboard():
         allocation_management(user_id)
 
     with tab2:
-        st.subheader("Historique de vos dépenses et avances")
+        user_transaction_history_and_cancellation(house_id, user_id, user_role)
 
-        # 1. Récupérer les transactions de l'utilisateur (Firestore)
-        user_transactions_df = get_user_transactions(house_id, user_id)
+def admin_transaction_management(house_id, admin_user_id, admin_user_role):
+    """
+    Interface de gestion/annulation de transactions pour le Chef de Maison.
+    Permet de visualiser et d'annuler n'importe quelle transaction de la maison.
+    """
+    st.header("Gestion et Annulation des Transactions de la Maison")
+    st.info("⚠️ Vous pouvez annuler n'importe quelle transaction de la maison. Cette action est irréversible.")
+    
+    df_all = get_transactions_for_house(house_id)
+    
+    if df_all.empty:
+        st.info("Aucune transaction enregistrée pour cette maison.")
+        return
+
+    # Préparation du DataFrame pour l'affichage
+    display_df = df_all.copy()
+    display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
+    display_df['Type'] = display_df['type'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre'))
+    display_df['Catégorie'] = display_df['category_name']
+    display_df['Statut Avance'] = display_df['statut_avance'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A'))
+    display_df['Transaction_ID'] = display_df['id']
+
+    cols_to_show = ['date', 'Type', 'Montant', 'full_name', 'Catégorie', 'description', 'payment_method', 'Statut Avance', 'Transaction_ID']
+    display_df = display_df[cols_to_show].rename(columns={
+        'date': 'Date', 
+        'full_name': 'Saisi par',
+        'description': 'Description', 
+        'payment_method': 'Moyen de Paiement'
+    }).sort_values('Date', ascending=False)
+    
+    st.markdown("##### Toutes les transactions (les plus récentes en premier)")
+    st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
+
+    # Interface d'annulation
+    st.markdown("---")
+    st.markdown("#### 🗑️ Annulation d'une Transaction")
+    
+    with st.form("form_admin_annulation_transaction", clear_on_submit=True):
+        col1, col2 = st.columns([3, 1])
         
-        if user_transactions_df.empty:
-            st.info("Vous n'avez pas encore saisi de transactions.")
-            return
-
-        # Préparer le DataFrame pour l'affichage
-        display_df = user_transactions_df.copy()
-        display_df['Montant'] = display_df['amount'].apply(lambda x: f"{x:,.2f} €")
-        display_df['Type'] = display_df['type'].apply(lambda t: TX_TYPE_MAP.get(t, 'Autre'))
-        display_df['Catégorie'] = display_df['category_name']
-        display_df['Statut Avance'] = display_df['statut_avance'].apply(lambda s: AVANCE_STATUS.get(s, 'N/A'))
-        display_df['Transaction_ID'] = display_df['id']
-
-        cols_to_show = ['date', 'Type', 'Montant', 'Catégorie', 'description', 'payment_method', 'Statut Avance', 'Transaction_ID']
-        display_df = display_df[cols_to_show].rename(columns={
-            'date': 'Date', 
-            'description': 'Description', 
-            'payment_method': 'Moyen de Paiement'
-        }).sort_values('Date', ascending=False)
+        transaction_to_delete = col1.selectbox(
+            "Sélectionnez la transaction à annuler :",
+            options=display_df['Transaction_ID'].tolist(),
+            format_func=lambda id: f"{display_df[display_df['Transaction_ID'] == id]['Date'].iloc[0].strftime('%Y-%m-%d')} - {display_df[display_df['Transaction_ID'] == id]['Montant'].iloc[0]} ({display_df[display_df['Transaction_ID'] == id]['Saisi par'].iloc[0]})"
+        )
         
-        st.dataframe(display_df.drop(columns=['Transaction_ID']), use_container_width=True)
+        submitted = col2.form_submit_button("Annuler la Transaction SÉLECTIONNÉE", type="secondary")
 
-        st.markdown("#### 🗑️ Annuler une Saisie Récente")
-        st.caption("Vous pouvez annuler toute transaction que vous avez saisie.")
-        
-        annulable_df = display_df.copy()
+        if submitted and transaction_to_delete:
+            success, message = delete_transaction(
+                transaction_to_delete, 
+                house_id,
+                admin_user_id,
+                admin_user_role # Utilisation du rôle admin/chef pour la permission
+            )
 
-        if not annulable_df.empty:
-            with st.form("form_annulation_transaction", clear_on_submit=True):
-                col1, col2 = st.columns([3, 1])
-                
-                # S'assurer que seules les transactions de cet utilisateur sont dans la liste
-                transaction_to_delete = col1.selectbox(
-                    "Sélectionnez la transaction à annuler :",
-                    options=annulable_df['Transaction_ID'].tolist(),
-                    # Utiliser .dt.strftime pour formater la date si c'est un datetime
-                    format_func=lambda id: f"{annulable_df[annulable_df['Transaction_ID'] == id]['Date'].iloc[0].strftime('%Y-%m-%d')} - {annulable_df[annulable_df['Transaction_ID'] == id]['Montant'].iloc[0]} ({annulable_df[annulable_df['Transaction_ID'] == id]['Description'].iloc[0][:30]}...)"
-                )
-                
-                submitted = col2.form_submit_button("Annuler la Dépense", type="secondary")
+            if success:
+                st.success(message)
+                get_transactions_for_house.clear() # Assurer la mise à jour
+                st.rerun()
+            else:
+                st.error(message)
 
-                if submitted and transaction_to_delete:
-                    success, message = delete_transaction(
-                        transaction_to_delete, 
-                        house_id,
-                        user_id,
-                        user_role
-                    )
-
-                    if success:
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-        else:
-            st.info("Aucune transaction à annuler trouvée.")
-
-def advance_validation_interface():
+def advance_validation_interface(house_id, validator_user_id):
     """ Interface visible uniquement par les Chefs de Maison pour valider les avances. """
     st.header("✅ Validation des Avances de Fonds")
     st.markdown("Veuillez valider les avances faites par les utilisateurs avant qu'elles n'affectent le solde à rembourser.")
 
-    house_id = st.session_state['house_id']
-    validator_user_id = st.session_state['user_id']
     
     # Récupérer toutes les transactions de la maison (Firestore)
     df_all = get_transactions_for_house(house_id)
@@ -586,6 +645,7 @@ def admin_interface():
     
     role = st.session_state['role']
     house_id = st.session_state['house_id']
+    user_id = st.session_state['user_id']
     house_name = get_house_name(house_id)
     
     df_all_transactions = get_transactions_for_house(house_id)
@@ -595,12 +655,15 @@ def admin_interface():
         # Menu spécifique pour le Chef de Maison
         admin_tab = st.sidebar.radio(
             "Menu Chef de Maison",
-            ['Rapports et Analyse', 'Validation des Avances']
+            ['Rapports et Analyse', 'Validation des Avances', 'Gestion des Transactions']
         )
         
         if admin_tab == 'Validation des Avances':
-            advance_validation_interface() 
+            advance_validation_interface(house_id, user_id) 
         
+        elif admin_tab == 'Gestion des Transactions':
+            admin_transaction_management(house_id, user_id, role)
+
         elif admin_tab == 'Rapports et Analyse':
             st.title(f"Rapports et Analyse pour {house_name}")
             st.info("Cette section est dédiée aux rapports avancés, aux analyses et à l'export des données.")
