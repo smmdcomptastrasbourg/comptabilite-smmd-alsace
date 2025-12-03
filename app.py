@@ -14,54 +14,71 @@ import io
 COL_USERS = "smmd_users" # Exemple de constante
 ROLES = ["admin", "superviseur", "utilisateur"] # Exemple de constante
 
-# --- FONCTION D'INITIALISATION FIREBASE (VERSION DEBUG) ---
+# --- FONCTION D'INITIALISATION FIREBASE (VERSION FINALE ROBUSTE) ---
 
-# Déclarer db en tant que variable globale pour être accessible par les autres fonctions
 db = None 
 
-# NOTE: @st.cache_resource EST RETIRÉ TEMPORAIREMENT POUR LE DÉBOGAGE
-def initialize_firebase_connection():
-    """Initialise Firebase en utilisant les secrets Streamlit et retourne le client Firestore."""
+# 1. Fonction de récupération des identifiants (priorité à l'environnement)
+def get_firebase_credentials():
+    """Tente de récupérer les identifiants depuis os.environ (Render) ou st.secrets (Local)."""
     
-    # 1. Vérification des secrets Streamlit
-    if 'firebase_credentials' not in st.secrets:
-        st.error("ERREUR DE CONFIGURATION: Le secret 'firebase_credentials' n'est pas défini dans .streamlit/secrets.toml.")
-        return None # <-- Retourne None au lieu de st.stop()
-        
-    cred_dict = st.secrets['firebase_credentials']
-        
-    # 2. Chargement des credentials (compte de service)
-    try:
-        # Tente de créer le certificat à partir du dictionnaire de secrets
-        cred = credentials.Certificate(cred_dict)
-    except Exception as e:
-        # Erreur probable : Clé privée mal formatée (sauts de ligne, guillemets)
-        st.error(f"Erreur lors du chargement du certificat Firebase : {e}")
-        return None # <-- Retourne None au lieu de st.stop()
-        
-    # 3. Initialisation sécurisée de l'application
-    try:
-        # Tente de récupérer l'application existante
-        app_instance = firebase_admin.get_app() 
-    except ValueError:
-        # Si elle n'existe pas, l'initialiser
-        app_instance = initialize_app(cred)
+    # 1. PRISE EN CHARGE DU DÉPLOIEMENT (Render)
+    if 'FIREBASE_SERVICE_ACCOUNT' in os.environ:
+        try:
+            # La variable doit être un string JSON en une seule ligne
+            return json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
+        except json.JSONDecodeError:
+            # Une erreur de décodage signifie que le JSON collé sur Render est mal formaté
+            st.error("ERREUR CRITIQUE: La variable FIREBASE_SERVICE_ACCOUNT est mal formatée (JSON invalide).")
+            return None
             
-    # 4. Retourne le client Firestore
-    db_client = firestore.client(app=app_instance)
+    # 2. PRISE EN CHARGE DU LOCAL (secrets.toml)
+    try:
+        if 'firebase_credentials' in st.secrets:
+            return st.secrets['firebase_credentials']
+    except Exception:
+        # st.secrets peut planter s'il ne trouve pas le fichier, 
+        # mais nous ignorons ce crash si on a déjà vérifié l'environnement.
+        pass
+
+    st.error("Configuration Firebase manquante. Veuillez configurer le fichier '.streamlit/secrets.toml' ou la variable d'environnement 'FIREBASE_SERVICE_ACCOUNT'.")
+    return None
+
+
+# 2. Fonction d'initialisation principale
+def initialize_firebase_connection():
+    """Initialise Firebase et retourne le client Firestore."""
+    
+    cred_dict = get_firebase_credentials()
+    if cred_dict is None:
+        return None
         
-    return db_client 
+    # Le reste de la logique est maintenant sécurisé
+    try:
+        cred = credentials.Certificate(cred_dict)
+
+        try:
+            app_instance = firebase_admin.get_app() 
+        except ValueError:
+            app_instance = initialize_app(cred)
+            
+        db_client = firestore.client(app=app_instance)
+        
+        return db_client
+    except Exception as e:
+        st.error(f"Erreur fatale lors de l'initialisation du certificat : {e}")
+        return None
+
     
 # Appel de la fonction pour initialiser db GLOBAL
 try:
-    # C'est ici que l'erreur de connexion/certificat se produira si elle existe.
     db = initialize_firebase_connection()
-except Exception as e:
-    # Affiche un message d'erreur général si quelque chose d'inattendu se produit
-    st.error(f"Erreur fatale lors de la connexion à la base de données : {e}")
+except Exception:
+    # Si initialize_firebase_connection échoue, db sera None et une erreur aura été affichée dans la fonction.
     db = None
 
 # --- FIN DU BLOC D'INITIALISATION ---
+
 # -------------------------------------------------------------------
 # --- 2. Constantes globales ---
 # -------------------------------------------------------------------
