@@ -1,3 +1,4 @@
+import firebase_admin
 import streamlit as st
 import os
 import json
@@ -13,52 +14,54 @@ import io
 COL_USERS = "smmd_users" # Exemple de constante
 ROLES = ["admin", "superviseur", "utilisateur"] # Exemple de constante
 
-# --- FONCTION D'INITIALISATION FIREBASE ---
+# --- FONCTION D'INITIALISATION FIREBASE (VERSION DEBUG) ---
 
-@st.cache_resource
-def initialize_firebase():
-    """Initialise Firebase en utilisant la variable d'environnement et retourne l'instance de l'application."""
+# Déclarer db en tant que variable globale pour être accessible par les autres fonctions
+db = None 
+
+# NOTE: @st.cache_resource EST RETIRÉ TEMPORAIREMENT POUR LE DÉBOGAGE
+def initialize_firebase_connection():
+    """Initialise Firebase en utilisant les secrets Streamlit et retourne le client Firestore."""
     
-    # 1. Gestion de la variable d'environnement manquante
-    if 'FIREBASE_SERVICE_ACCOUNT' not in os.environ:
-        st.error("ERREUR DE CONFIGURATION: Variable d'environnement 'FIREBASE_SERVICE_ACCOUNT' non définie.")
-        st.stop()
+    # 1. Vérification des secrets Streamlit
+    if 'firebase_credentials' not in st.secrets:
+        st.error("ERREUR DE CONFIGURATION: Le secret 'firebase_credentials' n'est pas défini dans .streamlit/secrets.toml.")
+        return None # <-- Retourne None au lieu de st.stop()
+        
+    cred_dict = st.secrets['firebase_credentials']
         
     # 2. Chargement des credentials (compte de service)
     try:
-        cred_json = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT'])
-        cred = credentials.Certificate(cred_json)
+        # Tente de créer le certificat à partir du dictionnaire de secrets
+        cred = credentials.Certificate(cred_dict)
     except Exception as e:
-        st.error(f"Erreur lors du chargement du JSON de service Firebase: {e}")
-        st.stop()
+        # Erreur probable : Clé privée mal formatée (sauts de ligne, guillemets)
+        st.error(f"Erreur lors du chargement du certificat Firebase : {e}")
+        return None # <-- Retourne None au lieu de st.stop()
         
-    # 3. Initialisation sécurisée
+    # 3. Initialisation sécurisée de l'application
     try:
-        # Tente l'initialisation. Si l'application existe déjà, ValueError est levée.
-        app_instance = initialize_app(cred)
+        # Tente de récupérer l'application existante
+        app_instance = firebase_admin.get_app() 
     except ValueError:
-        # L'application par défaut existe déjà (à cause de Streamlit), nous la récupérons.
+        # Si elle n'existe pas, l'initialiser
+        app_instance = initialize_app(cred)
+            
+    # 4. Retourne le client Firestore
+    db_client = firestore.client(app=app_instance)
         
-        # 🚨 CORRECTION FINALE ET ROBUSTE : Gestion des différentes versions de firebase-admin SDK
-        try:
-            # Tente la méthode moderne (pour SDK >= 4.0)
-            from firebase_admin.app import get_app 
-        except ImportError:
-            # Si l'importation moderne échoue, tente la méthode plus ancienne (pour SDK < 4.0)
-            try:
-                from firebase_admin import get_app
-            except ImportError as e:
-                # Si même l'ancienne méthode échoue, cela signifie une installation corrompue ou très ancienne.
-                st.error(f"Erreur fatale : Impossible de trouver 'get_app' dans Firebase Admin. Veuillez vérifier la version installée de 'firebase-admin' dans requirements.txt.")
-                st.stop()
-        
-        app_instance = get_app()
-        
-    # 4. Utilisation de l'instance pour initialiser le client Firestore
-    db = firestore.client(app=app_instance)
-        
-    return app_instance, db # Retourne l'instance de l'application et du client db
+    return db_client 
+    
+# Appel de la fonction pour initialiser db GLOBAL
+try:
+    # C'est ici que l'erreur de connexion/certificat se produira si elle existe.
+    db = initialize_firebase_connection()
+except Exception as e:
+    # Affiche un message d'erreur général si quelque chose d'inattendu se produit
+    st.error(f"Erreur fatale lors de la connexion à la base de données : {e}")
+    db = None
 
+# --- FIN DU BLOC D'INITIALISATION ---
 # -------------------------------------------------------------------
 # --- 2. Constantes globales ---
 # -------------------------------------------------------------------
@@ -97,9 +100,9 @@ TX_TYPE_MAP = {
 @st.cache_data(ttl=3600)
 def get_categories():
     """Récupère et cache toutes les catégories depuis Firestore."""
-    if not db: return {}
+    if not db: return {} # type: ignore
     try:
-        docs = db.collection(COL_CATEGORIES).stream()
+        docs = db.collection(COL_CATEGORIES).stream() # type: ignore
         # Assurez-vous que l'ID du document est la clé et le 'name' la valeur
         categories = {doc.id: doc.to_dict().get('name', 'N/A') for doc in docs}
         return categories
